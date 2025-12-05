@@ -1,5 +1,4 @@
 import pandas as pd
-print("DEBUG: App script started.")
 import numpy as np
 import streamlit as st
 import plotly.express as px
@@ -231,9 +230,7 @@ def preprocess_data(_df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------- Load & preprocess ----------
 df_raw = load_all()
-print("DEBUG: Data loaded.")
 df = preprocess_data(df_raw)
-print("DEBUG: Data preprocessed.")
 if df.empty:
     st.warning("No data loaded. Place MEPL.xlsx, MLPL.xlsx, mmw.xlsx, mmpl.xlsx next to this script or upload files.")
 
@@ -336,7 +333,6 @@ entity_col = safe_col(df, ['entity','company','brand','entity_name'])
 pr_requester_col = safe_col(df, ['pr_requester','requester','pr_requester_name','pr_requester_name','requester_name'])
 
 # ----------------- Sidebar filters -----------------
-print("DEBUG: Starting UI rendering.")
 if LOGO_PATH.exists():
     st.sidebar.image(str(LOGO_PATH), use_column_width=True)
 st.sidebar.header('Filters')
@@ -513,6 +509,18 @@ with T[0]:
                 textposition='top center', textfont=dict(color=highlight_color, size=9),
                 hovertemplate='%{x}<br>Cumulative: %{y:.2f} Cr<extra></extra>'),
                 secondary_y=True)
+
+            # Add total labels on top of each bar
+            fig.add_trace(go.Scatter(
+                x=xaxis_labels,
+                y=total_cr,
+                mode='text',
+                text=[f'{v:.2f}' for v in total_cr],
+                textposition='top center',
+                showlegend=False,
+                hovertemplate=None,
+                hoverinfo='none'
+            ), secondary_y=False)
 
             fig.update_layout(barmode='stack', xaxis_tickangle=-45, title='Monthly Spend (stacked by Entity) + Cumulative',
                 legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
