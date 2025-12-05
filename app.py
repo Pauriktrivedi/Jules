@@ -1,4 +1,5 @@
 import pandas as pd
+print("DEBUG: App script started.")
 import numpy as np
 import streamlit as st
 import plotly.express as px
@@ -230,7 +231,9 @@ def preprocess_data(_df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------- Load & preprocess ----------
 df_raw = load_all()
+print("DEBUG: Data loaded.")
 df = preprocess_data(df_raw)
+print("DEBUG: Data preprocessed.")
 if df.empty:
     st.warning("No data loaded. Place MEPL.xlsx, MLPL.xlsx, mmw.xlsx, mmpl.xlsx next to this script or upload files.")
 
@@ -252,33 +255,32 @@ def _excel_col_letter(i: int) -> str:
 if 'col_map' not in st.session_state:
     st.session_state['col_map'] = {}
 
-if st.sidebar.checkbox('Show data diagnostics & column mapping'):
-    with st.sidebar.expander('Data diagnostics & column mapping', expanded=True):
-        st.write('Detected columns (Excel letter : column name):')
-        if cols:
-            # show compact list
-            for i, c in enumerate(cols):
-                st.write(f"{_excel_col_letter(i)} : {c}")
-            st.write('Preview of first 5 rows:')
-            try:
-                st.dataframe(df.head(5))
-            except Exception:
-                st.write(df.head(5).to_string())
-        else:
-            st.write('No columns detected')
-        st.markdown('---')
-        st.write('If any of the automatic mappings are wrong, pick the correct column below to override.')
-        candidates = ['-- none --'] + cols
-        # mapping selectors
-        st.session_state['col_map']['pr_qty_col'] = st.selectbox('PR Quantity column (override)', options=candidates, index=0, key='map_pr_qty_col')
-        st.session_state['col_map']['pr_unit_rate_col'] = st.selectbox('PR Unit Rate column (override)', options=candidates, index=0, key='map_pr_unit_rate_col')
-        st.session_state['col_map']['pr_value_col'] = st.selectbox('PR Value column (override)', options=candidates, index=0, key='map_pr_value_col')
-        st.session_state['col_map']['po_qty_col'] = st.selectbox('PO Quantity column (override)', options=candidates, index=0, key='map_po_qty_col')
-        st.session_state['col_map']['po_unit_rate_col'] = st.selectbox('PO Unit Rate column (override)', options=candidates, index=0, key='map_po_unit_rate_col')
-        st.session_state['col_map']['net_col'] = st.selectbox('Net Amount / PO Value column (override)', options=candidates, index=0, key='map_net_col')
-        st.markdown('---')
-        st.write('Current overrides:')
-        st.json({k:v for k,v in st.session_state['col_map'].items() if v and v!='-- none --'})
+if st.sidebar.checkbox('Show data diagnostics & column mapping', key='show_diagnostics'):
+    st.sidebar.write('Detected columns (Excel letter : column name):')
+    if cols:
+        # show compact list
+        for i, c in enumerate(cols):
+            st.sidebar.write(f"{_excel_col_letter(i)} : {c}")
+        st.sidebar.write('Preview of first 5 rows:')
+        try:
+            st.sidebar.dataframe(df.head(5))
+        except Exception:
+            st.sidebar.write(df.head(5).to_string())
+    else:
+        st.sidebar.write('No columns detected')
+    st.sidebar.markdown('---')
+    st.sidebar.write('If any of the automatic mappings are wrong, pick the correct column below to override.')
+    candidates = ['-- none --'] + cols
+    # mapping selectors
+    st.session_state['col_map']['pr_qty_col'] = st.sidebar.selectbox('PR Quantity column (override)', options=candidates, index=0, key='map_pr_qty_col')
+    st.session_state['col_map']['pr_unit_rate_col'] = st.sidebar.selectbox('PR Unit Rate column (override)', options=candidates, index=0, key='map_pr_unit_rate_col')
+    st.session_state['col_map']['pr_value_col'] = st.sidebar.selectbox('PR Value column (override)', options=candidates, index=0, key='map_pr_value_col')
+    st.session_state['col_map']['po_qty_col'] = st.sidebar.selectbox('PO Quantity column (override)', options=candidates, index=0, key='map_po_qty_col')
+    st.session_state['col_map']['po_unit_rate_col'] = st.sidebar.selectbox('PO Unit Rate column (override)', options=candidates, index=0, key='map_po_unit_rate_col')
+    st.session_state['col_map']['net_col'] = st.sidebar.selectbox('Net Amount / PO Value column (override)', options=candidates, index=0, key='map_net_col')
+    st.sidebar.markdown('---')
+    st.sidebar.write('Current overrides:')
+    st.sidebar.json({k:v for k,v in st.session_state['col_map'].items() if v and v!='-- none --'})
 
 
 # Apply overrides (if set) to the canonical variables used later
@@ -334,6 +336,7 @@ entity_col = safe_col(df, ['entity','company','brand','entity_name'])
 pr_requester_col = safe_col(df, ['pr_requester','requester','pr_requester_name','pr_requester_name','requester_name'])
 
 # ----------------- Sidebar filters -----------------
+print("DEBUG: Starting UI rendering.")
 if LOGO_PATH.exists():
     st.sidebar.image(str(LOGO_PATH), use_column_width=True)
 st.sidebar.header('Filters')
