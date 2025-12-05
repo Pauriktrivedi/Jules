@@ -200,7 +200,9 @@ def preprocess_data(_df: pd.DataFrame) -> pd.DataFrame:
     po_orderer_col = 'po_orderer'
 
     df['po_creator'] = df[po_orderer_col].astype(str).str.upper().map(upper_map).fillna(df[po_orderer_col].astype(str))
-    df['po_creator'] = df['po_creator'].replace({'N/A': 'Dilip', '': 'Dilip'})
+    # Standardize 'na' variations to 'Dilip'
+    df['po_creator'] = df['po_creator'].str.upper().replace({'N/A': 'Dilip', 'NA': 'Dilip', '': 'Dilip'})
+    df['po_creator'] = df['po_creator'].fillna('Dilip')
 
     # po_buyer_type
     creator_clean = df['po_creator'].fillna('').astype(str).str.strip()
@@ -385,6 +387,13 @@ fil.loc[~fil['Buyer.Type'].isin(['Direct', 'Indirect']), 'Buyer.Type'] = 'Direct
 entity_choices = sorted([e for e in fil['entity'].cat.categories.tolist() if str(e).strip() != '']) if 'entity' in fil.columns and fil['entity'].dtype.name=='category' else sorted([e for e in fil['entity'].dropna().unique().tolist() if str(e).strip() != ''])
 sel_e = st.sidebar.multiselect('Entity', entity_choices, default=entity_choices)
 
+# Procurement Category filter
+if 'procurement_category' in fil.columns:
+    proc_cat_choices = sorted([str(x) for x in fil['procurement_category'].dropna().unique() if str(x).strip()])
+    sel_pc = st.sidebar.multiselect('Procurement Category', proc_cat_choices, default=proc_cat_choices)
+else:
+    sel_pc = []
+
 sel_o = st.sidebar.multiselect('PO Ordered By',
     sorted([str(x) for x in fil.get('po_creator', pd.Series(dtype=object)).dropna().unique().tolist() if str(x).strip()!='']),
     default=sorted([str(x) for x in fil.get('po_creator', pd.Series(dtype=object)).dropna().unique().tolist() if str(x).strip()!='']))
@@ -414,6 +423,8 @@ if sel_b:
     mask &= fil['Buyer.Type'].isin(sel_b)
 if sel_e and 'entity' in fil.columns:
     mask &= fil['entity'].isin(sel_e)
+if sel_pc:
+    mask &= fil['procurement_category'].isin(sel_pc)
 if sel_o:
     mask &= fil['po_creator'].isin(sel_o)
 if sel_v:
@@ -427,7 +438,7 @@ fil = fil[mask]
 def _sel_key(values):
     return tuple(sorted(str(v) for v in values)) if values else ()
 filter_signature = (
-    fy_key, date_range_key, _sel_key(sel_b), _sel_key(sel_e),
+    fy_key, date_range_key, _sel_key(sel_b), _sel_key(sel_e), _sel_key(sel_pc),
     _sel_key(sel_o), _sel_key(sel_v), _sel_key(sel_i),
 )
 
