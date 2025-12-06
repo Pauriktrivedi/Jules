@@ -5,8 +5,19 @@ import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
 from plotly.subplots import make_subplots
+import time
+import logging
 
 # ---------- CONFIG ----------
+# Set up a logger that works reliably with Streamlit
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    handler = logging.FileHandler('app.log', mode='w')
+    formatter = logging.Formatter('%(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
 DATA_DIR = Path(__file__).resolve().parent
 LOGO_PATH = DATA_DIR / "matter_logo.png"
 INDIRECT_BUYERS = {
@@ -136,10 +147,16 @@ def compute_buyer_display(df: pd.DataFrame, purchase_doc_col: str | None, reques
     if purchase_doc_col and purchase_doc_col in df.columns:
         has_po = df[purchase_doc_col].fillna('').astype(str).str.strip() != ''
 
-    # choose in vectorized manner
-    buyer_display = np.where(has_po & (po_creator != ''), po_creator, '')
-    buyer_display = np.where((buyer_display == '') & (requester != ''), requester, buyer_display)
-    buyer_display = np.where(buyer_display == '', 'PR only - Unassigned', buyer_display)
+    # choose in vectorized manner with np.select
+    conditions = [
+        has_po & (po_creator != ''),
+        (po_creator == '') & (requester != '')
+    ]
+    choices = [
+        po_creator,
+        requester
+    ]
+    buyer_display = np.select(conditions, choices, default='PR only - Unassigned')
     return pd.Series(buyer_display, index=df.index, dtype=object)
 
 
@@ -193,16 +210,11 @@ def preprocess_data(_df: pd.DataFrame) -> pd.DataFrame:
     }
     upper_map = {k.upper(): v for k, v in o_created_by_map.items()}
     po_orderer_col = safe_col(df, ['po_orderer', 'po orderer', 'po_orderer_code'])
-    if po_orderer_col and po_orderer_col in df.columns:
-        df[po_orderer_col] = df[po_orderer_col].fillna('N/A').astype(str).str.strip()
-    else:
-        df['po_orderer'] = 'N/A'
-    po_orderer_col = 'po_orderer'
-
-    df['po_creator'] = df[po_orderer_col].astype(str).str.upper().map(upper_map).fillna(df[po_orderer_col].astype(str))
-    # Standardize 'na' variations to 'Dilip'
-    df['po_creator'] = df['po_creator'].str.upper().replace({'N/A': 'Dilip', 'NA': 'Dilip', '': 'Dilip'})
-    df['po_creator'] = df['po_creator'].fillna('Dilip')
+    df['po_orderer'] = df[po_orderer_col].fillna('N/A').astype(str).str.strip() if po_orderer_col in df.columns else 'N/A'
+    
+    # Optimized po_creator mapping
+    df['po_creator'] = df['po_orderer'].str.upper().map(upper_map).fillna(df['po_orderer'])
+    df['po_creator'] = df['po_creator'].replace({'N/A': 'Dilip', 'NA': 'Dilip', '': 'Dilip', 'NAN': 'Dilip'}).fillna('Dilip')
 
     # po_buyer_type
     creator_clean = df['po_creator'].fillna('').astype(str).str.strip()
@@ -215,24 +227,28 @@ def preprocess_data(_df: pd.DataFrame) -> pd.DataFrame:
 
     # Convert common columns to categorical to speed groupbys & joins
     po_vendor_col = safe_col(df, ['po_vendor', 'vendor', 'po vendor'])
-    if po_vendor_col and po_vendor_col in df.columns:
-        df[po_vendor_col] = df[po_vendor_col].fillna('').astype(str)
-    else:
-        df['po_vendor'] = ''
-        po_vendor_col = 'po_vendor'
-
-    if 'product_name' in df.columns:
-        df['product_name'] = df['product_name'].fillna('').astype(str)
-    else:
-        df['product_name'] = ''
+    df['po_vendor'] = df[po_vendor_col].fillna('').astype(str) if po_vendor_col in df.columns else ''
+    df['product_name'] = df['product_name'].fillna('').astype(str) if 'product_name' in df.columns else ''
+    
     for c in ['entity', 'po_creator', 'buyer_display', po_vendor_col]:
-        if c and c in df.columns:
-            to_cat(df, c)
+        to_cat(df, c)
+        
     return df
 
 # ---------- Load & preprocess ----------
+logger.info("Starting data loading...")
+load_start_time = time.time()
 df_raw = load_all()
+load_end_time = time.time()
+logger.info(f"Data loading took: {load_end_time - load_start_time:.2f} seconds")
+
+logger.info("Starting data preprocessing...")
+preprocess_start_time = time.time()
 df = preprocess_data(df_raw)
+preprocess_end_time = time.time()
+logger.info(f"Data preprocessing took: {preprocess_end_time - preprocess_start_time:.2f} seconds")
+
+
 if df.empty:
     st.warning("No data loaded. Place MEPL.xlsx, MLPL.xlsx, mmw.xlsx, mmpl.xlsx next to this script or upload files.")
 
@@ -335,6 +351,8 @@ entity_col = safe_col(df, ['entity','company','brand','entity_name'])
 pr_requester_col = safe_col(df, ['pr_requester','requester','pr_requester_name','pr_requester_name','requester_name'])
 
 # ----------------- Sidebar filters -----------------
+logger.info("Applying filters...")
+filter_start_time = time.time()
 if LOGO_PATH.exists():
     st.sidebar.image(str(LOGO_PATH), use_column_width=True)
 st.sidebar.header('Filters')
@@ -432,6 +450,8 @@ if sel_v:
 if sel_i:
     mask &= fil['product_name'].isin(sel_i)
 fil = fil[mask]
+filter_end_time = time.time()
+logger.info(f"Filter application took: {filter_end_time - filter_start_time:.2f} seconds")
 
 
 # Helper to create deterministic signature for caching
@@ -1126,7 +1146,7 @@ with T[10]:
         res = search_df[mask_any].copy()
         if cat_sel:
             res = res[res['procurement_category'].astype(str).isin(cat_sel)]
-        if vend_sel and po_vendor_col in search_df.columns:
+        if vend_sel and po_vendor_col in df.columns:
             res = res[res[po_vendor_col].astype(str).isin(vend_sel)]
         st.write(f'Found {len(res)} rows')
         st.dataframe(res, use_container_width=True)
