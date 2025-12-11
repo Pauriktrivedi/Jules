@@ -230,7 +230,7 @@ def preprocess_data(_df: pd.DataFrame) -> pd.DataFrame:
     df['po_vendor'] = df[po_vendor_col].fillna('').astype(str) if po_vendor_col in df.columns else ''
     df['product_name'] = df['product_name'].fillna('').astype(str) if 'product_name' in df.columns else ''
     
-    for c in ['entity', 'po_creator', 'buyer_display', po_vendor_col]:
+    for c in ['entity', 'po_creator', 'buyer_display', po_vendor_col, 'Buyer.Type', 'procurement_category', 'product_name']:
         to_cat(df, c)
         
     return df
@@ -435,21 +435,23 @@ else:
     sel_i = []
 
 
-# Apply filters (order matters, do vectorized boolean masks)
-mask = pd.Series(True, index=fil.index)
+# Apply filters using df.query() for potential performance improvement
+query_parts = []
 if sel_b:
-    mask &= fil['Buyer.Type'].isin(sel_b)
+    query_parts.append('`Buyer.Type` in @sel_b')
 if sel_e and 'entity' in fil.columns:
-    mask &= fil['entity'].isin(sel_e)
+    query_parts.append('entity in @sel_e')
 if sel_pc:
-    mask &= fil['procurement_category'].isin(sel_pc)
+    query_parts.append('procurement_category in @sel_pc')
 if sel_o:
-    mask &= fil['po_creator'].isin(sel_o)
+    query_parts.append('po_creator in @sel_o')
 if sel_v:
-    mask &= fil['po_vendor'].isin(sel_v)
+    query_parts.append('po_vendor in @sel_v')
 if sel_i:
-    mask &= fil['product_name'].isin(sel_i)
-fil = fil[mask]
+    query_parts.append('product_name in @sel_i')
+
+if query_parts:
+    fil = fil.query(' & '.join(query_parts))
 filter_end_time = time.time()
 logger.info(f"Filter application took: {filter_end_time - filter_start_time:.2f} seconds")
 
