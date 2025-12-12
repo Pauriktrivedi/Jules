@@ -109,6 +109,105 @@ def load_all():
         st.error(f"Failed to load Parquet file: {e}")
         return pd.DataFrame()
 
+# ---------- Vendor Master Parsing (New) ----------
+@st.cache_data(show_spinner=False)
+def load_vendor_master():
+    """
+    Parses 'meplvendor.xlsx', 'mlplvendor.xlsx', 'mmwvendor.xlsx', 'mmplvendor.xlsx' 
+    if present in DATA_DIR. Returns a unified DataFrame of vendor details.
+    Structure: Entity | VendorCode | VendorName | Address | Phone | Email
+    """
+    vendor_files = {
+        'MEPL': 'meplvendor.xlsx',
+        'MLPL': 'mlplvendor.xlsx',
+        'MMW':  'mmwvendor.xlsx',
+        'MMPL': 'mmplvendor.xlsx'
+    }
+    
+    records = []
+    
+    for entity, fname in vendor_files.items():
+        fpath = DATA_DIR / fname
+        if not fpath.exists():
+            continue
+            
+        try:
+            # Read headerless to parse semi-structured content
+            df = pd.read_excel(fpath, header=None)
+            
+            # Find all rows that start a vendor block (Col A == "Vendor account")
+            # Using iloc[:, 0] to be safe with column names
+            # Vendor Account code is usually at index+0, col C (index 2)
+            # Vendor Name is usually at index+6, col I (index 9) - wait, from exploration it was row +6 relative to 'Vendor account' row?
+            # Exploration showed:
+            # Row 6: A='Vendor account', C='ME/VEND/...'
+            # Row 12: A='Address', G='Vendor name', I='Makino...'
+            # So offset is +6 rows for Name.
+            
+            # Let's locate indices where Col 0 is 'Vendor account'
+            start_indices = df.index[df.iloc[:, 0].astype(str).str.strip() == 'Vendor account'].tolist()
+            
+            for start_idx in start_indices:
+                # Code
+                code = df.iloc[start_idx, 2] # Col C
+                
+                # We scan a reasonable block size, say 50 rows, or until next 'Vendor account'
+                # But given the structure is seemingly fixed:
+                
+                # Name (Row + 6)
+                # Exploration: Row 12 is +6 from Row 6. 
+                # Col I is index 9 (matches 'Unnamed: 9')
+                name = None
+                if start_idx + 6 < len(df):
+                     val_g = str(df.iloc[start_idx + 6, 6]).strip() # Check label 'Vendor name'
+                     if val_g == 'Vendor name':
+                         name = df.iloc[start_idx + 6, 9] # Col I
+                
+                # Address (Row + 6)
+                # Col A is 'Address', Col C is value
+                address = None
+                if start_idx + 6 < len(df):
+                    val_a = str(df.iloc[start_idx + 6, 0]).strip()
+                    if val_a == 'Address':
+                        address = df.iloc[start_idx + 6, 2]
+
+                # Telephone, Email - scan downwards from start_idx
+                phone = None
+                email = None
+                
+                # Scan next 40 rows for keywords in Col A
+                limit = min(start_idx + 40, len(df))
+                for r in range(start_idx, limit):
+                    label = str(df.iloc[r, 0]).strip()
+                    if label == 'Telephone':
+                        phone = df.iloc[r, 2]
+                    elif label == 'Email':
+                        email = df.iloc[r, 2]
+                    
+                    # Stop if we hit next block
+                    if r > start_idx and label == 'Vendor account':
+                        break
+                
+                records.append({
+                    'Entity': entity,
+                    'VendorCode': str(code).strip(),
+                    'VendorName': str(name).strip() if name else None,
+                    'Address': str(address).strip() if address else None,
+                    'Phone': str(phone).strip() if phone else None,
+                    'Email': str(email).strip() if email else None
+                })
+
+        except Exception as e:
+            logger.error(f"Error parsing vendor file {fname}: {e}")
+            
+    if records:
+        v_df = pd.DataFrame(records)
+        # Normalize name for matching
+        v_df['VendorName_Norm'] = v_df['VendorName'].astype(str).str.lower().str.strip()
+        return v_df
+    
+    return pd.DataFrame(columns=['Entity', 'VendorCode', 'VendorName', 'Address', 'Phone', 'Email', 'VendorName_Norm'])
+
 # ---------- Fast type/coercion utilities ----------
 
 def to_cat(df, col):
@@ -251,6 +350,7 @@ def preprocess_data(_df: pd.DataFrame) -> pd.DataFrame:
 logger.info("Starting data loading...")
 load_start_time = time.time()
 df_raw = load_all()
+vendor_master = load_vendor_master() # Load vendor details
 load_end_time = time.time()
 logger.info(f"Data loading took: {load_end_time - load_start_time:.2f} seconds")
 
@@ -980,6 +1080,34 @@ with T[4]:
             v_spend = sub[net_amount_col].sum() / 1e7
             v_pos = sub[purchase_doc_col].nunique() if purchase_doc_col in sub.columns else 0
             
+            # Vendor Contact Details (New)
+            st.markdown("#### Vendor Contact & Info")
+            
+            found_contact = False
+            if not vendor_master.empty:
+                # Normalize selected vendor
+                sel_norm = str(sel_vendor).lower().strip()
+                match = vendor_master[vendor_master['VendorName_Norm'] == sel_norm]
+                
+                if not match.empty:
+                    found_contact = True
+                    # There might be multiple matches (across entities). Show unique ones.
+                    
+                    # Deduplicate by Code
+                    u_matches = match.drop_duplicates(subset=['VendorCode'])
+                    
+                    for idx, row in u_matches.iterrows():
+                        with st.expander(f"Contact Details ({row['Entity']}) - {row['VendorCode']}", expanded=True):
+                            cd1, cd2 = st.columns(2)
+                            cd1.write(f"**Phone:** {row['Phone'] if row['Phone'] else 'N/A'}")
+                            cd1.write(f"**Email:** {row['Email'] if row['Email'] else 'N/A'}")
+                            cd2.write(f"**Address:** {row['Address'] if row['Address'] else 'N/A'}")
+            
+            if not found_contact:
+                st.caption("No contact details found in vendor master files.")
+                
+            st.markdown("---")
+
             vc1, vc2 = st.columns(2)
             vc1.metric(f"Spend: {sel_vendor}", f"{v_spend:.2f} Cr")
             vc2.metric("PO Count", v_pos)
