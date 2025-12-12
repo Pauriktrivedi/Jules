@@ -900,6 +900,12 @@ with T[2]:
             cols.append(po_approved)
         if net_amount_col and net_amount_col in fil.columns:
             cols.append(net_amount_col)
+        
+        # Add Vendor and Product Name for display
+        if po_vendor_col and po_vendor_col in fil.columns:
+            cols.append(po_vendor_col)
+        if 'product_name' in fil.columns:
+            cols.append('product_name')
             
         p_df = fil[[c for c in cols if c in fil.columns]].copy()
         
@@ -945,11 +951,19 @@ with T[2]:
         pending_df = po_app_df[~po_app_df['is_approved']].copy()
         
         if not pending_df.empty:
-            # Drop duplicates if purchase_doc exists to count unique POs
+            # Aggregate to get unique POs with summed Net Amount and combined Product Names
+            agg_dict = {}
+            if 'po_creator' in pending_df.columns: agg_dict['po_creator'] = 'first'
+            if po_create and po_create in pending_df.columns: agg_dict[po_create] = 'first'
+            if po_vendor_col and po_vendor_col in pending_df.columns: agg_dict[po_vendor_col] = 'first'
+            if net_amount_col and net_amount_col in pending_df.columns: agg_dict[net_amount_col] = 'sum'
+            if 'product_name' in pending_df.columns: 
+                agg_dict['product_name'] = lambda x: ', '.join(sorted(set(str(i) for i in x.dropna().unique() if str(i).strip() != '')))
+
             if purchase_doc_col and purchase_doc_col in pending_df.columns:
-                unique_pending = pending_df.drop_duplicates(subset=[purchase_doc_col])
+                unique_pending = pending_df.groupby(purchase_doc_col, as_index=False).agg(agg_dict)
             else:
-                unique_pending = pending_df
+                unique_pending = pending_df # Fallback
                 
             # Group by Buyer
             buyer_pending_counts = unique_pending.groupby('po_creator').size().reset_index(name='Pending PO Count')
@@ -962,7 +976,7 @@ with T[2]:
             c_p2.write("**Pending PO List**")
             
             # Buyer Selection Dropdown
-            buyers_list = sorted(unique_pending['po_creator'].unique().tolist())
+            buyers_list = sorted([str(x) for x in unique_pending['po_creator'].unique().tolist() if pd.notna(x) and str(x).strip() != ''])
             selected_buyer_pending = c_p2.selectbox("Filter by Buyer", ['All'] + buyers_list)
             
             # Filter Data
@@ -978,7 +992,7 @@ with T[2]:
                 filtered_pending['Age (Days)'] = np.nan
 
             # Select relevant columns for the list
-            # Requested: PO Number, Vendor Name, Net Amount, Age
+            # Requested: PO Number, Vendor Name, Product Name, Net Amount, Age
             display_cols = []
             rename_map = {}
             
@@ -989,6 +1003,10 @@ with T[2]:
             if po_vendor_col and po_vendor_col in filtered_pending.columns:
                 display_cols.append(po_vendor_col)
                 rename_map[po_vendor_col] = 'Vendor Name'
+            
+            if 'product_name' in filtered_pending.columns:
+                display_cols.append('product_name')
+                rename_map['product_name'] = 'Product Name'
                 
             if net_amount_col and net_amount_col in filtered_pending.columns:
                 display_cols.append(net_amount_col)
