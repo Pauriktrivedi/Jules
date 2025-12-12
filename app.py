@@ -7,6 +7,7 @@ from pathlib import Path
 from plotly.subplots import make_subplots
 import time
 import logging
+import traceback
 
 # ---------- CONFIG ----------
 # Set up a logger that works reliably with Streamlit
@@ -60,6 +61,10 @@ def memoized_compute(namespace: str, signature: tuple, compute_fn):
     if key not in store:
         store[key] = compute_fn()
     return store[key]
+
+@st.cache_data
+def convert_df_to_csv(df):
+    return df.to_csv(index=False).encode('utf-8')
 
 def _resolve_path(fn: str) -> Path:
     path = Path(fn)
@@ -230,6 +235,10 @@ def preprocess_data(_df: pd.DataFrame) -> pd.DataFrame:
     df['po_vendor'] = df[po_vendor_col].fillna('').astype(str) if po_vendor_col in df.columns else ''
     df['product_name'] = df['product_name'].fillna('').astype(str) if 'product_name' in df.columns else ''
     
+    # Ensure purchase_doc is categorical to speed up groupby in Delivery tab
+    if purchase_doc_col and purchase_doc_col in df.columns:
+        to_cat(df, purchase_doc_col)
+
     for c in ['entity', 'po_creator', 'buyer_display', po_vendor_col, 'Buyer.Type', 'procurement_category', 'product_name']:
         to_cat(df, c)
         
@@ -411,10 +420,12 @@ if 'procurement_category' in fil.columns:
     sel_pc = st.sidebar.multiselect('Procurement Category', proc_cat_choices, default=proc_cat_choices)
 else:
     sel_pc = []
+    proc_cat_choices = []
 
-sel_o = st.sidebar.multiselect('PO Ordered By',
-    sorted([str(x) for x in fil.get('po_creator', pd.Series(dtype=object)).dropna().unique().tolist() if str(x).strip()!='']),
-    default=sorted([str(x) for x in fil.get('po_creator', pd.Series(dtype=object)).dropna().unique().tolist() if str(x).strip()!='']))
+# PO Ordered By
+creators = sorted([str(x) for x in fil.get('po_creator', pd.Series(dtype=object)).dropna().unique().tolist() if str(x).strip()!=''])
+# Optimization: remove default=creators to speed up loading
+sel_o = st.sidebar.multiselect('PO Ordered By', creators) 
 
 # Buyer Type choices
 choices_bt = sorted(fil['Buyer.Type'].dropna().unique().tolist())
@@ -423,31 +434,41 @@ sel_b = st.sidebar.multiselect('Buyer Type', choices_bt, default=choices_bt)
 
 # Vendor + Item filters
 if po_vendor_col and po_vendor_col in fil.columns:
-    vendor_choices = sorted(fil[po_vendor_col].cat.categories) if fil[po_vendor_col].dtype.name == 'category' else sorted(fil[po_vendor_col].unique())
-    sel_v = st.sidebar.multiselect('Vendor (pick one or more)', vendor_choices, default=vendor_choices)
+    if pd.api.types.is_categorical_dtype(fil[po_vendor_col]):
+        vendor_choices = sorted(fil[po_vendor_col].cat.categories)
+    else:
+        vendor_choices = sorted(fil[po_vendor_col].unique())
+    # Optimization: remove default=vendor_choices to speed up loading (no serialization of 1000 items)
+    sel_v = st.sidebar.multiselect('Vendor (pick one or more)', vendor_choices) # default is None
 else:
     sel_v = []
+    vendor_choices = []
 
 if 'product_name' in fil.columns:
     item_choices = sorted(fil['product_name'].unique())
-    sel_i = st.sidebar.multiselect('Item / Product (pick one or more)', item_choices, default=item_choices)
+    # Optimization: remove default=item_choices
+    sel_i = st.sidebar.multiselect('Item / Product (pick one or more)', item_choices) # default is None
 else:
     sel_i = []
+    item_choices = []
 
 
 # Apply filters using df.query() for potential performance improvement
 query_parts = []
-if sel_b:
+if sel_b and len(sel_b) < len(choices_bt):
     query_parts.append('`Buyer.Type` in @sel_b')
-if sel_e and 'entity' in fil.columns:
+if sel_e and 'entity' in fil.columns and len(sel_e) < len(entity_choices):
     query_parts.append('entity in @sel_e')
-if sel_pc:
+if sel_pc and len(sel_pc) < len(proc_cat_choices):
     query_parts.append('procurement_category in @sel_pc')
-if sel_o:
+
+if sel_o and len(sel_o) < len(creators):
     query_parts.append('po_creator in @sel_o')
-if sel_v:
+
+if sel_v and len(sel_v) < len(vendor_choices):
     query_parts.append('po_vendor in @sel_v')
-if sel_i:
+
+if sel_i and len(sel_i) < len(item_choices):
     query_parts.append('product_name in @sel_i')
 
 if query_parts:
@@ -1165,7 +1186,7 @@ with T[11]:
     st.subheader('Full Data — all filtered rows')
     try:
         st.dataframe(fil.reset_index(drop=True), use_container_width=True)
-        csv = fil.to_csv(index=False)
+        csv = convert_df_to_csv(fil)
         st.download_button('⬇️ Download full filtered data (CSV)', csv, file_name='p2p_full_filtered.csv', mime='text/csv')
     except Exception as e:
         st.error(f'Could not display full data: {e}')
