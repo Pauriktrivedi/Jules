@@ -960,10 +960,48 @@ with T[2]:
             c_p1.dataframe(buyer_pending_counts, use_container_width=True)
             
             c_p2.write("**Pending PO List**")
+            
+            # Buyer Selection Dropdown
+            buyers_list = sorted(unique_pending['po_creator'].unique().tolist())
+            selected_buyer_pending = c_p2.selectbox("Filter by Buyer", ['All'] + buyers_list)
+            
+            # Filter Data
+            if selected_buyer_pending != 'All':
+                filtered_pending = unique_pending[unique_pending['po_creator'] == selected_buyer_pending].copy()
+            else:
+                filtered_pending = unique_pending.copy()
+            
+            # Calculate Age
+            if po_create and po_create in filtered_pending.columns:
+                filtered_pending['Age (Days)'] = (pd.Timestamp.now() - filtered_pending[po_create]).dt.days
+            else:
+                filtered_pending['Age (Days)'] = np.nan
+
             # Select relevant columns for the list
-            list_cols = ['po_creator', purchase_doc_col, po_create, net_amount_col]
-            list_cols = [c for c in list_cols if c and c in unique_pending.columns]
-            c_p2.dataframe(unique_pending[list_cols].sort_values('po_creator'), use_container_width=True)
+            # Requested: PO Number, Vendor Name, Net Amount, Age
+            display_cols = []
+            rename_map = {}
+            
+            if purchase_doc_col and purchase_doc_col in filtered_pending.columns:
+                display_cols.append(purchase_doc_col)
+                rename_map[purchase_doc_col] = 'PO Number'
+                
+            if po_vendor_col and po_vendor_col in filtered_pending.columns:
+                display_cols.append(po_vendor_col)
+                rename_map[po_vendor_col] = 'Vendor Name'
+                
+            if net_amount_col and net_amount_col in filtered_pending.columns:
+                display_cols.append(net_amount_col)
+                rename_map[net_amount_col] = 'Net Amount'
+                
+            display_cols.append('Age (Days)')
+            
+            # Ensure po_creator is available for sorting if not in display
+            sort_col = 'po_creator' if 'po_creator' in filtered_pending.columns else display_cols[0]
+            
+            final_df = filtered_pending[display_cols].rename(columns=rename_map)
+            
+            c_p2.dataframe(final_df, use_container_width=True)
         else:
             st.success("No pending approvals found!")
 
