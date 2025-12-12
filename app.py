@@ -8,6 +8,7 @@ from plotly.subplots import make_subplots
 import time
 import logging
 import traceback
+import re
 
 # ---------- CONFIG ----------
 # Set up a logger that works reliably with Streamlit
@@ -115,7 +116,7 @@ def load_vendor_master():
     """
     Parses 'meplvendor.xlsx', 'mlplvendor.xlsx', 'mmwvendor.xlsx', 'mmplvendor.xlsx' 
     if present in DATA_DIR. Returns a unified DataFrame of vendor details.
-    Structure: Entity | VendorCode | VendorName | Address | Phone | Email
+    Structure: Entity | VendorCode | VendorName | Address | Phone | Email | State | City
     """
     vendor_files = {
         'MEPL': 'meplvendor.xlsx',
@@ -136,27 +137,13 @@ def load_vendor_master():
             df = pd.read_excel(fpath, header=None)
             
             # Find all rows that start a vendor block (Col A == "Vendor account")
-            # Using iloc[:, 0] to be safe with column names
-            # Vendor Account code is usually at index+0, col C (index 2)
-            # Vendor Name is usually at index+6, col I (index 9) - wait, from exploration it was row +6 relative to 'Vendor account' row?
-            # Exploration showed:
-            # Row 6: A='Vendor account', C='ME/VEND/...'
-            # Row 12: A='Address', G='Vendor name', I='Makino...'
-            # So offset is +6 rows for Name.
-            
-            # Let's locate indices where Col 0 is 'Vendor account'
             start_indices = df.index[df.iloc[:, 0].astype(str).str.strip() == 'Vendor account'].tolist()
             
             for start_idx in start_indices:
                 # Code
                 code = df.iloc[start_idx, 2] # Col C
                 
-                # We scan a reasonable block size, say 50 rows, or until next 'Vendor account'
-                # But given the structure is seemingly fixed:
-                
                 # Name (Row + 6)
-                # Exploration: Row 12 is +6 from Row 6. 
-                # Col I is index 9 (matches 'Unnamed: 9')
                 name = None
                 if start_idx + 6 < len(df):
                      val_g = str(df.iloc[start_idx + 6, 6]).strip() # Check label 'Vendor name'
@@ -164,29 +151,49 @@ def load_vendor_master():
                          name = df.iloc[start_idx + 6, 9] # Col I
                 
                 # Address (Row + 6)
-                # Col A is 'Address', Col C is value
                 address = None
                 if start_idx + 6 < len(df):
                     val_a = str(df.iloc[start_idx + 6, 0]).strip()
                     if val_a == 'Address':
                         address = df.iloc[start_idx + 6, 2]
 
-                # Telephone, Email - scan downwards from start_idx
+                # Initialize other fields
                 phone = None
                 email = None
+                state = None
+                city = None
                 
                 # Scan next 40 rows for keywords in Col A
                 limit = min(start_idx + 40, len(df))
                 for r in range(start_idx, limit):
                     label = str(df.iloc[r, 0]).strip()
+                    
                     if label == 'Telephone':
                         phone = df.iloc[r, 2]
                     elif label == 'Email':
                         email = df.iloc[r, 2]
+                    elif label == 'State':
+                        state = df.iloc[r, 2]
                     
                     # Stop if we hit next block
                     if r > start_idx and label == 'Vendor account':
                         break
+                
+                # Heuristic to parse City from Address if possible
+                # Pattern: "City -Zip" (e.g., "Noida -201301")
+                if address:
+                    # Look for lines containing " -<digits>"
+                    # or lines before state/country codes.
+                    # Simple Regex approach:
+                    # Matches "Word -123456" but ensures no newlines in the captured group
+                    match = re.search(r'(?:^|\n)([^\n]+?)\s*-\s*\d{6}', str(address))
+                    if match:
+                        city = match.group(1).strip()
+                    else:
+                        # Fallback: sometimes it is "City-Zip" without space
+                         match2 = re.search(r'(?:^|\n)([^\n]+?)-\d{6}', str(address))
+                         if match2:
+                             city = match2.group(1).strip()
                 
                 records.append({
                     'Entity': entity,
@@ -194,7 +201,9 @@ def load_vendor_master():
                     'VendorName': str(name).strip() if name else None,
                     'Address': str(address).strip() if address else None,
                     'Phone': str(phone).strip() if phone else None,
-                    'Email': str(email).strip() if email else None
+                    'Email': str(email).strip() if email else None,
+                    'State': str(state).strip() if state else None,
+                    'City': str(city).strip() if city else None
                 })
 
         except Exception as e:
@@ -206,7 +215,7 @@ def load_vendor_master():
         v_df['VendorName_Norm'] = v_df['VendorName'].astype(str).str.lower().str.strip()
         return v_df
     
-    return pd.DataFrame(columns=['Entity', 'VendorCode', 'VendorName', 'Address', 'Phone', 'Email', 'VendorName_Norm'])
+    return pd.DataFrame(columns=['Entity', 'VendorCode', 'VendorName', 'Address', 'Phone', 'Email', 'State', 'City', 'VendorName_Norm'])
 
 # ---------- Fast type/coercion utilities ----------
 
@@ -1067,10 +1076,35 @@ with T[4]:
         ).reset_index()
         v_stats['Spend (Cr)'] = v_stats['Spend'] / 1e7
         v_stats = v_stats.sort_values('Spend (Cr)', ascending=False)
+
+        # Merge with master data to show enriched table
+        if not vendor_master.empty:
+            # We use normalized matching or left join on name if possible
+            # But the vendor names in transaction data may vary slightly.
+            # We'll try a naive merge on Vendor Name first.
+            vm_unique = vendor_master.sort_values('Entity').drop_duplicates(subset=['VendorName_Norm'], keep='first')
+            
+            # Prepare join column
+            v_stats['VendorName_Norm'] = v_stats[po_vendor_col].astype(str).str.lower().str.strip()
+            
+            # Join
+            v_enriched = pd.merge(v_stats, vm_unique[['VendorName_Norm', 'Email', 'Phone', 'City', 'State']], 
+                                  on='VendorName_Norm', how='left')
+            
+            # Display enriched table instead of just list
+            st.markdown("#### Vendor List (Sorted by Spend)")
+            display_cols = [po_vendor_col, 'Spend (Cr)', 'PO_Count', 'City', 'State', 'Phone', 'Email']
+            st.dataframe(v_enriched[display_cols], use_container_width=True)
+            
+            # Use enriched list for selection
+            v_list = v_stats[po_vendor_col].astype(str).tolist()
+        else:
+            v_list = v_stats[po_vendor_col].astype(str).tolist()
+            st.dataframe(v_stats[[po_vendor_col, 'Spend (Cr)', 'PO_Count']], use_container_width=True)
+
         
         # Vendor Selector
-        v_list = v_stats[po_vendor_col].astype(str).tolist()
-        sel_vendor = st.selectbox("Select Vendor", v_list)
+        sel_vendor = st.selectbox("Select Vendor to View Details", v_list)
         
         if sel_vendor:
             # Vendor Detail View
@@ -1080,7 +1114,7 @@ with T[4]:
             v_spend = sub[net_amount_col].sum() / 1e7
             v_pos = sub[purchase_doc_col].nunique() if purchase_doc_col in sub.columns else 0
             
-            # Vendor Contact Details (New)
+            # Vendor Contact Details
             st.markdown("#### Vendor Contact & Info")
             
             found_contact = False
@@ -1102,6 +1136,7 @@ with T[4]:
                             cd1.write(f"**Phone:** {row['Phone'] if row['Phone'] else 'N/A'}")
                             cd1.write(f"**Email:** {row['Email'] if row['Email'] else 'N/A'}")
                             cd2.write(f"**Address:** {row['Address'] if row['Address'] else 'N/A'}")
+                            cd2.write(f"**City/State:** {row['City'] if row['City'] else ''} {row['State'] if row['State'] else ''}")
             
             if not found_contact:
                 st.caption("No contact details found in vendor master files.")
@@ -1111,6 +1146,16 @@ with T[4]:
             vc1, vc2 = st.columns(2)
             vc1.metric(f"Spend: {sel_vendor}", f"{v_spend:.2f} Cr")
             vc2.metric("PO Count", v_pos)
+
+            # Entity Breakdown Chart (New)
+            if 'entity' in sub.columns:
+                ent_breakdown = sub.groupby('entity')[net_amount_col].sum().reset_index()
+                ent_breakdown['Spend (Cr)'] = ent_breakdown[net_amount_col] / 1e7
+                if not ent_breakdown.empty:
+                    fig_ent = px.pie(ent_breakdown, values='Spend (Cr)', names='entity', 
+                                     title=f"Spend Breakdown by Entity: {sel_vendor}",
+                                     hole=0.4)
+                    st.plotly_chart(fig_ent, use_container_width=True)
             
             # Items / Services Table
             st.markdown("**Items / Services Provided:**")
