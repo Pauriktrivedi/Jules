@@ -461,6 +461,10 @@ with T[0]:
             return pd.DataFrame()
         z = fil.loc[fil['_month_bucket'].notna(), ['_month_bucket', 'entity', net_amount_col]].copy()
         z['month'] = z['_month_bucket']
+        
+        # FIX: Strict FY filtering for the chart to avoid bleed into next FY
+        z = z[(z['month'] >= pr_start) & (z['month'] <= pr_end)]
+        
         # groupby using categorical 'entity' is fast
         return z.groupby(['month','entity'], dropna=False)[net_amount_col].sum().reset_index()
 
@@ -804,17 +808,19 @@ with T[2]:
     if po_app_df.empty:
         st.info("PO Approval columns not found (need PO Create Date).")
     else:
-        # Metrics
-        total_recs = len(po_app_df)
-        approved_count = po_app_df['is_approved'].sum()
-        pending_count = total_recs - approved_count
+        # Metrics: Count unique POs
+        unique_pos_df = po_app_df.drop_duplicates(subset=[purchase_doc_col]) if purchase_doc_col in po_app_df.columns else po_app_df
         
-        # Pending Value
+        total_unique_pos = len(unique_pos_df)
+        approved_count = unique_pos_df['is_approved'].sum()
+        pending_count = total_unique_pos - approved_count
+        
+        # Pending Value (remains sum of line items for accuracy)
         pending_val = 0.0
         if net_amount_col and net_amount_col in po_app_df.columns:
             pending_val = po_app_df.loc[~po_app_df['is_approved'], net_amount_col].sum()
 
-        avg_approval_time = po_app_df['approval_lead_time'].mean()
+        avg_approval_time = unique_pos_df['approval_lead_time'].mean()
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Avg Approval Time (Days)", f"{avg_approval_time:.1f}")
@@ -881,12 +887,12 @@ with T[3]:
             
         ag = memoized_compute('delivery_summary', filter_signature, build_delivery)
         
-        # Metrics
+        # Metrics using unique POs
         open_pos = ag[ag['is_open']]
         closed_pos = ag[~ag['is_open']]
         
-        cnt_open = len(open_pos)
-        cnt_closed = len(closed_pos)
+        cnt_open = open_pos[purchase_doc_col].nunique()
+        cnt_closed = closed_pos[purchase_doc_col].nunique()
         val_open = open_pos['open_val'].sum()
         
         d1, d2, d3 = st.columns(3)
@@ -910,69 +916,106 @@ with T[3]:
 
 # ----------------- Vendors -----------------
 with T[4]:
-    st.subheader('Vendor Insights')
+    st.subheader('Vendor Insights & Service Buckets')
+    
     if po_vendor_col and net_amount_col and po_vendor_col in fil.columns and net_amount_col in fil.columns:
-        def build_vendor_stats():
-            # Spend by vendor
-            v_spend = fil.groupby(po_vendor_col, dropna=False)[net_amount_col].sum().reset_index()
-            v_spend.columns = [po_vendor_col, 'total_spend']
-            v_spend['cr'] = v_spend['total_spend'] / 1e7
+        # Top level metrics
+        total_spend = fil[net_amount_col].sum() / 1e7
+        total_vendors = fil[po_vendor_col].nunique()
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Vendors", total_vendors)
+        c2.metric("Total Spend (Cr)", f"{total_spend:.2f}")
+        
+        # 1. Category / Service Bucket Drilldown
+        st.markdown("### 1. Service Buckets (Categories)")
+        
+        # Aggregate by Category
+        if 'procurement_category' in fil.columns:
+            cat_df = fil.groupby('procurement_category', dropna=False).agg(
+                Spend=(net_amount_col, 'sum'),
+                VendorCount=(po_vendor_col, 'nunique')
+            ).reset_index().sort_values('Spend', ascending=False)
+            cat_df['Spend (Cr)'] = cat_df['Spend'] / 1e7
             
-            # Unique vendors count
-            unique_vendors = fil[po_vendor_col].nunique()
+            # Chart
+            fig_cat = px.bar(cat_df, x='procurement_category', y='Spend (Cr)', 
+                             hover_data=['VendorCount'], text='Spend (Cr)',
+                             title='Spend by Category')
+            fig_cat.update_traces(texttemplate='%{text:.2f}', textposition='outside')
+            st.plotly_chart(fig_cat, use_container_width=True)
             
-            # Entity-wise vendor counts
-            if 'entity' in fil.columns:
-                # nunique per entity
-                ent_v = fil.groupby('entity')[po_vendor_col].nunique().reset_index(name='vendor_count')
-            else:
-                ent_v = pd.DataFrame()
-            
-            # Category-wise spend & vendor count
-            if 'procurement_category' in fil.columns:
-                cat_stats = fil.groupby('procurement_category', dropna=False).agg(
-                    spend=(net_amount_col, 'sum'),
-                    vendor_count=(po_vendor_col, 'nunique')
-                ).reset_index()
-                cat_stats['spend_cr'] = cat_stats['spend'] / 1e7
-            else:
-                cat_stats = pd.DataFrame()
-                
-            return v_spend, unique_vendors, ent_v, cat_stats
+            # Selector
+            cats = ['All'] + sorted(cat_df['procurement_category'].dropna().astype(str).unique().tolist())
+            sel_cat = st.selectbox("Select Category to Filter Vendors", cats)
+        else:
+            sel_cat = 'All'
+            st.info("Procurement Category not available.")
 
-        vs, uv_count, ent_v, cat_stats = memoized_compute('vendor_stats', filter_signature, build_vendor_stats)
-        
-        # Metric
-        st.metric("Total Unique Vendors", uv_count)
+        # Filter for Vendor section
+        v_df = fil.copy()
+        if sel_cat != 'All' and 'procurement_category' in v_df.columns:
+            v_df = v_df[v_df['procurement_category'].astype(str) == sel_cat]
+            
         st.markdown("---")
+        st.markdown(f"### 2. Vendors in '{sel_cat}'")
         
-        # Charts
-        c1, c2 = st.columns(2)
+        # Vendor list in this context
+        v_stats = v_df.groupby(po_vendor_col).agg(
+            Spend=(net_amount_col, 'sum'),
+            PO_Count=(purchase_doc_col, 'nunique') if purchase_doc_col in v_df.columns else ('entity', 'count')
+        ).reset_index()
+        v_stats['Spend (Cr)'] = v_stats['Spend'] / 1e7
+        v_stats = v_stats.sort_values('Spend (Cr)', ascending=False)
         
-        with c1:
-            st.subheader("Vendors by Entity")
-            if not ent_v.empty:
-                fig_ev = px.bar(ent_v, x='entity', y='vendor_count', text='vendor_count', title='Unique Vendors per Entity')
-                fig_ev.update_traces(textposition='outside')
-                st.plotly_chart(fig_ev, use_container_width=True)
+        # Vendor Selector
+        v_list = v_stats[po_vendor_col].astype(str).tolist()
+        sel_vendor = st.selectbox("Select Vendor", v_list)
+        
+        if sel_vendor:
+            # Vendor Detail View
+            sub = v_df[v_df[po_vendor_col].astype(str) == sel_vendor]
+            
+            # Metrics for this vendor
+            v_spend = sub[net_amount_col].sum() / 1e7
+            v_pos = sub[purchase_doc_col].nunique() if purchase_doc_col in sub.columns else 0
+            
+            vc1, vc2 = st.columns(2)
+            vc1.metric(f"Spend: {sel_vendor}", f"{v_spend:.2f} Cr")
+            vc2.metric("PO Count", v_pos)
+            
+            # Items / Services Table
+            st.markdown("**Items / Services Provided:**")
+            if 'product_name' in sub.columns:
+                # Group by product name to see frequency or spend per item
+                items = sub.groupby('product_name').agg(
+                    Count=(purchase_doc_col, 'count'),
+                    Total_Spend=(net_amount_col, 'sum')
+                ).reset_index().sort_values('Total_Spend', ascending=False)
+                items['Total_Spend'] = items['Total_Spend'].apply(lambda x: f"{x:,.2f}")
+                st.dataframe(items, use_container_width=True)
             else:
-                st.info("Entity information missing.")
-                
-        with c2:
-            st.subheader("Category-wise Stats")
-            if not cat_stats.empty:
-                # Toggle between Spend and Vendor Count
-                cat_mode = st.radio("Show Category by:", ["Spend (Cr)", "Vendor Count"], horizontal=True)
-                y_col = 'spend_cr' if cat_mode == "Spend (Cr)" else 'vendor_count'
-                fig_cat = px.bar(cat_stats.sort_values(y_col, ascending=False), x='procurement_category', y=y_col, text=y_col, title=f'Category by {cat_mode}')
-                fig_cat.update_traces(texttemplate='%{text:.2f}' if cat_mode=="Spend (Cr)" else '%{text}', textposition='outside')
-                st.plotly_chart(fig_cat, use_container_width=True)
-            else:
-                st.info("Procurement Category missing.")
+                st.dataframe(sub.head(50))
 
         st.markdown("---")
-        st.subheader('Top Vendors by Spend')
-        st.dataframe(vs.sort_values('cr', ascending=False).head(50), use_container_width=True)
+        st.markdown("### 3. Reverse Lookup (Service -> Vendors)")
+        # Simple text search for products to find vendors
+        srv_query = st.text_input("Enter Service/Item keyword (e.g. 'Laptop', 'Housekeeping')", "")
+        if srv_query and 'product_name' in fil.columns:
+            mask = fil['product_name'].astype(str).str.lower().str.contains(srv_query.lower())
+            found = fil[mask]
+            if not found.empty:
+                # Group by Vendor
+                v_found = found.groupby(po_vendor_col).agg(
+                    Spend=(net_amount_col, 'sum'),
+                    Matches=('product_name', 'count')
+                ).reset_index().sort_values('Spend', ascending=False)
+                v_found['Spend'] = v_found['Spend'].apply(lambda x: f"{x/1e7:.4f} Cr")
+                st.write(f"Vendors supplying '{srv_query}':")
+                st.dataframe(v_found, use_container_width=True)
+            else:
+                st.warning("No matches found.")
+                
     else:
         st.info('Vendor / Net Amount columns not present.')
 
