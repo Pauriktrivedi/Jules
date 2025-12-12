@@ -938,7 +938,37 @@ with T[2]:
         m4.metric("Pending PO Value (Cr)", f"{pending_val/1e7:,.2f}")
         
         st.markdown('---')
-        st.subheader("Approval Detail List")
+        
+        # New: Buyer-wise Pending Count & List
+        st.subheader("Buyer-wise Pending Approvals")
+        
+        pending_df = po_app_df[~po_app_df['is_approved']].copy()
+        
+        if not pending_df.empty:
+            # Drop duplicates if purchase_doc exists to count unique POs
+            if purchase_doc_col and purchase_doc_col in pending_df.columns:
+                unique_pending = pending_df.drop_duplicates(subset=[purchase_doc_col])
+            else:
+                unique_pending = pending_df
+                
+            # Group by Buyer
+            buyer_pending_counts = unique_pending.groupby('po_creator').size().reset_index(name='Pending PO Count')
+            buyer_pending_counts = buyer_pending_counts.sort_values('Pending PO Count', ascending=False)
+            
+            c_p1, c_p2 = st.columns(2)
+            c_p1.write("**Pending Count by Buyer**")
+            c_p1.dataframe(buyer_pending_counts, use_container_width=True)
+            
+            c_p2.write("**Pending PO List**")
+            # Select relevant columns for the list
+            list_cols = ['po_creator', purchase_doc_col, po_create, net_amount_col]
+            list_cols = [c for c in list_cols if c and c in unique_pending.columns]
+            c_p2.dataframe(unique_pending[list_cols].sort_values('po_creator'), use_container_width=True)
+        else:
+            st.success("No pending approvals found!")
+
+        st.markdown('---')
+        st.subheader("All Approval Details")
         
         desired = ['po_creator', purchase_doc_col, po_create, po_approved, 'approval_lead_time', 'is_approved', net_amount_col]
         show_cols = [c for c in desired if c and c in po_app_df.columns]
