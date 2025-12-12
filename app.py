@@ -219,7 +219,10 @@ def preprocess_data(_df: pd.DataFrame) -> pd.DataFrame:
     
     # Optimized po_creator mapping
     df['po_creator'] = df['po_orderer'].str.upper().map(upper_map).fillna(df['po_orderer'])
-    df['po_creator'] = df['po_creator'].replace({'N/A': 'Dilip', 'NA': 'Dilip', '': 'Dilip', 'NAN': 'Dilip'}).fillna('Dilip')
+    # Robust Dilip mapping (handle nan/null strings case-insensitive)
+    df['po_creator'] = df['po_creator'].fillna('Dilip').astype(str)
+    mask_dilip = df['po_creator'].str.strip().str.lower().isin(['nan', 'n/a', 'na', '', 'none', 'null'])
+    df.loc[mask_dilip, 'po_creator'] = 'Dilip'
 
     # po_buyer_type
     creator_clean = df['po_creator'].fillna('').astype(str).str.strip()
@@ -261,86 +264,10 @@ logger.info(f"Data preprocessing took: {preprocess_end_time - preprocess_start_t
 if df.empty:
     st.warning("No data loaded. Place MEPL.xlsx, MLPL.xlsx, mmw.xlsx, mmpl.xlsx next to this script or upload files.")
 
-# ---------- Data diagnostics & column mapping UI ----------
-# This section helps identify which physical Excel columns map to the canonical fields
-cols = list(df.columns)
-def _excel_col_letter(i: int) -> str:
-    # 0->A, 25->Z, 26->AA, etc.
-    letters = ''
-    i_orig = i
-    while True:
-        i, rem = divmod(i, 26)
-        letters = chr(65 + rem) + letters
-        if i == 0:
-            break
-        i -= 1
-    return letters
-
-if 'col_map' not in st.session_state:
-    st.session_state['col_map'] = {}
-
-if st.sidebar.checkbox('Show data diagnostics & column mapping', key='show_diagnostics'):
-    st.sidebar.write('Detected columns (Excel letter : column name):')
-    if cols:
-        # show compact list
-        for i, c in enumerate(cols):
-            st.sidebar.write(f"{_excel_col_letter(i)} : {c}")
-        st.sidebar.write('Preview of first 5 rows:')
-        try:
-            st.sidebar.dataframe(df.head(5))
-        except Exception:
-            st.sidebar.write(df.head(5).to_string())
-    else:
-        st.sidebar.write('No columns detected')
-    st.sidebar.markdown('---')
-    st.sidebar.write('If any of the automatic mappings are wrong, pick the correct column below to override.')
-    candidates = ['-- none --'] + cols
-    # mapping selectors
-    st.session_state['col_map']['pr_qty_col'] = st.sidebar.selectbox('PR Quantity column (override)', options=candidates, index=0, key='map_pr_qty_col')
-    st.session_state['col_map']['pr_unit_rate_col'] = st.sidebar.selectbox('PR Unit Rate column (override)', options=candidates, index=0, key='map_pr_unit_rate_col')
-    st.session_state['col_map']['pr_value_col'] = st.sidebar.selectbox('PR Value column (override)', options=candidates, index=0, key='map_pr_value_col')
-    st.session_state['col_map']['po_qty_col'] = st.sidebar.selectbox('PO Quantity column (override)', options=candidates, index=0, key='map_po_qty_col')
-    st.session_state['col_map']['po_unit_rate_col'] = st.sidebar.selectbox('PO Unit Rate column (override)', options=candidates, index=0, key='map_po_unit_rate_col')
-    st.session_state['col_map']['net_col'] = st.sidebar.selectbox('Net Amount / PO Value column (override)', options=candidates, index=0, key='map_net_col')
-    st.sidebar.markdown('---')
-    st.sidebar.write('Current overrides:')
-    st.sidebar.json({k:v for k,v in st.session_state['col_map'].items() if v and v!='-- none --'})
-
-
-# Apply overrides (if set) to the canonical variables used later
-_col_map = st.session_state.get('col_map', {})
-if _col_map:
-    def _pick_override(varname, detected):
-        v = _col_map.get(varname)
-        if v and v != '-- none --' and v in df.columns:
-            return v
-        return detected
-    # override detected canonical names if user selected
-    try: # safe: some variables may not be defined yet in code flow; we set them to None first
-        pr_qty_col = globals().get('pr_qty_col', None)
-        pr_unit_rate_col = globals().get('pr_unit_rate_col', None)
-        pr_value_col = globals().get('pr_value_col', None)
-        po_qty_col = globals().get('po_qty_col', None)
-        po_unit_rate_col = globals().get('po_unit_rate_col', None)
-        net_col = globals().get('net_col', None)
-    except Exception:
-        pr_qty_col = pr_unit_rate_col = pr_value_col = po_qty_col = po_unit_rate_col = net_col = None
-
-    pr_qty_col = _pick_override('pr_qty_col', pr_qty_col)
-    pr_unit_rate_col = _pick_override('pr_unit_rate_col', pr_unit_rate_col)
-    pr_value_col = _pick_override('pr_value_col', pr_value_col)
-    po_qty_col = _pick_override('po_qty_col', po_qty_col)
-    po_unit_rate_col = _pick_override('po_unit_rate_col', po_unit_rate_col)
-    net_col = _pick_override('net_col', net_col)
-
-    # persist overrides back to globals so downstream code uses them
-    globals()['pr_qty_col'] = pr_qty_col
-    globals()['pr_unit_rate_col'] = pr_unit_rate_col
-    globals()['pr_value_col'] = pr_value_col
-    globals()['po_qty_col'] = po_qty_col
-    globals()['po_unit_rate_col'] = po_unit_rate_col
-    globals()['net_col'] = net_col
-
+# ---------- Canonical column detection ----------
+# (Diagnostics section removed per user request)
+# Ensure globals for overrides are set to None if not present (since diagnostics removed)
+pr_qty_col = pr_unit_rate_col = pr_value_col = po_qty_col = po_unit_rate_col = net_col = None
 
 # canonical column detection
 pr_col = safe_col(df, ['pr_date_submitted', 'pr_date', 'pr date submitted'])
@@ -377,8 +304,16 @@ pr_start, pr_end = FY[fy_key]
 
 # Work on a filtered view (avoid copies until necessary)
 fil = df
+# FY Filtering Logic: Use PR Date if available; fallback to PO Create Date for rows where PR Date is missing
 if pr_col and pr_col in fil.columns:
-    fil = fil[(fil[pr_col] >= pr_start) & (fil[pr_col] <= pr_end)]
+    # Use PR date primarily, backfill with PO date for filtering check
+    d_check = fil[pr_col]
+    if po_create_col and po_create_col in fil.columns:
+        d_check = d_check.fillna(fil[po_create_col])
+    fil = fil[(d_check >= pr_start) & (d_check <= pr_end)]
+elif po_create_col and po_create_col in fil.columns:
+    # Fallback if PR column completely missing
+    fil = fil[(fil[po_create_col] >= pr_start) & (fil[po_create_col] <= pr_end)]
 
 # Date range filter
 date_basis = pr_col if pr_col in fil.columns else (po_create_col if po_create_col in fil.columns else None)
@@ -843,21 +778,54 @@ with T[2]:
     po_approved = safe_col(df, ['po_approved_date', 'po approved date'])
 
     def build_po_app_df():
-        if not (po_create and po_approved and po_create in fil.columns and po_approved in fil.columns):
+        # Requires at least po_create; if po_approved missing, we can still show pending counts
+        if not (po_create and po_create in fil.columns):
             return pd.DataFrame()
-        cols = ['po_creator', purchase_doc_col, po_create, po_approved]
+        
+        cols = ['po_creator', purchase_doc_col, po_create]
+        if po_approved and po_approved in fil.columns:
+            cols.append(po_approved)
+        if net_amount_col and net_amount_col in fil.columns:
+            cols.append(net_amount_col)
+            
         p_df = fil[[c for c in cols if c in fil.columns]].copy()
-        p_df['approval_lead_time'] = (p_df[po_approved] - p_df[po_create]).dt.days
+        
+        if po_approved and po_approved in p_df.columns:
+            p_df['is_approved'] = p_df[po_approved].notna()
+            p_df['approval_lead_time'] = (p_df[po_approved] - p_df[po_create]).dt.days
+        else:
+            p_df['is_approved'] = False
+            p_df['approval_lead_time'] = np.nan
+            
         return p_df
 
     po_app_df = memoized_compute('po_approval', filter_signature, build_po_app_df)
 
     if po_app_df.empty:
-        st.info("PO Approval columns not found (need PO Create Date and PO Approved Date).")
+        st.info("PO Approval columns not found (need PO Create Date).")
     else:
+        # Metrics
+        total_recs = len(po_app_df)
+        approved_count = po_app_df['is_approved'].sum()
+        pending_count = total_recs - approved_count
+        
+        # Pending Value
+        pending_val = 0.0
+        if net_amount_col and net_amount_col in po_app_df.columns:
+            pending_val = po_app_df.loc[~po_app_df['is_approved'], net_amount_col].sum()
+
         avg_approval_time = po_app_df['approval_lead_time'].mean()
-        st.metric("Avg Approval Time (Days)", f"{avg_approval_time:.1f}")
-        desired = ['po_creator', purchase_doc_col, po_create, po_approved, 'approval_lead_time']
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Avg Approval Time (Days)", f"{avg_approval_time:.1f}")
+        m2.metric("Approved POs", int(approved_count))
+        m3.metric("Pending POs", int(pending_count))
+        m4.metric("Pending PO Value (Cr)", f"{pending_val/1e7:,.2f}")
+        
+        st.markdown('---')
+        st.subheader("Approval Detail List")
+        
+        desired = ['po_creator', purchase_doc_col, po_create, po_approved, 'approval_lead_time', 'is_approved', net_amount_col]
         show_cols = [c for c in desired if c and c in po_app_df.columns]
         if show_cols:
             po_detail = po_app_df[show_cols].copy()
@@ -877,29 +845,134 @@ with T[3]:
 
     if po_qty_col and received_col and po_qty_col in dv.columns and received_col in dv.columns:
         def build_delivery():
-            tmp = dv[[po_qty_col, received_col, purchase_doc_col, po_vendor_col]].copy()
+            # Include Net Amount for Open Value calc
+            cols = [po_qty_col, received_col, purchase_doc_col, po_vendor_col]
+            if net_amount_col and net_amount_col in dv.columns:
+                cols.append(net_amount_col)
+                
+            tmp = dv[[c for c in cols if c in dv.columns]].copy()
             tmp['po_qty_f'] = tmp[po_qty_col].fillna(0).astype(float)
             tmp['received_f'] = tmp[received_col].fillna(0).astype(float)
-            tmp['pct_received'] = np.where(tmp['po_qty_f']>0, tmp['received_f']/tmp['po_qty_f']*100, 0)
-            return tmp.groupby([purchase_doc_col, po_vendor_col], dropna=False).agg({
-                'po_qty_f':'sum','received_f':'sum','pct_received':'mean'
-            }).reset_index()
+            
+            if net_amount_col and net_amount_col in tmp.columns:
+                tmp['net_val'] = tmp[net_amount_col].fillna(0).astype(float)
+            else:
+                tmp['net_val'] = 0.0
+
+            # Group by PO
+            # Aggregation: Sum Qty, Sum Received, Sum Net Amount (assuming net amount is line level)
+            agg_rules = {'po_qty_f':'sum', 'received_f':'sum', 'net_val':'sum'}
+            
+            grp = tmp.groupby([purchase_doc_col, po_vendor_col], dropna=False).agg(agg_rules).reset_index()
+            
+            # Derived metrics
+            grp['pct_received'] = np.where(grp['po_qty_f']>0, grp['received_f']/grp['po_qty_f']*100, 0)
+            grp['is_open'] = grp['received_f'] < grp['po_qty_f']
+            grp['is_partial'] = (grp['received_f'] > 0) & (grp['received_f'] < grp['po_qty_f'])
+            
+            # Open Value: Pro-rata? Or full line value if not fully received? 
+            # Usually "Open PO Value" means the value of the goods NOT yet received.
+            # Approximation: net_val * (1 - received/qty)
+            ratio = np.where(grp['po_qty_f']>0, grp['received_f']/grp['po_qty_f'], 1.0)
+            ratio = np.clip(ratio, 0, 1) # Ensure bounded
+            grp['open_val'] = grp['net_val'] * (1 - ratio)
+            
+            return grp
+            
         ag = memoized_compute('delivery_summary', filter_signature, build_delivery)
-        st.dataframe(ag.sort_values('po_qty_f', ascending=False).head(200), use_container_width=True)
+        
+        # Metrics
+        open_pos = ag[ag['is_open']]
+        closed_pos = ag[~ag['is_open']]
+        
+        cnt_open = len(open_pos)
+        cnt_closed = len(closed_pos)
+        val_open = open_pos['open_val'].sum()
+        
+        d1, d2, d3 = st.columns(3)
+        d1.metric("Open POs", cnt_open)
+        d2.metric("Closed POs", cnt_closed)
+        d3.metric("Open PO Value (Cr)", f"{val_open/1e7:,.2f}")
+        
+        st.markdown("---")
+        
+        # Lists
+        st.subheader("Open POs (Received < Ordered)")
+        st.dataframe(open_pos.sort_values('open_val', ascending=False).head(500), use_container_width=True)
+        
+        st.subheader("Partial Delivery POs (0 < Received < Ordered)")
+        partial_pos = ag[ag['is_partial']]
+        st.dataframe(partial_pos.sort_values('open_val', ascending=False).head(500), use_container_width=True)
+        
     else:
         st.info('Delivery columns (PO Qty / Received QTY) not found.')
 
 
 # ----------------- Vendors -----------------
 with T[4]:
-    st.subheader('Top Vendors by Spend')
+    st.subheader('Vendor Insights')
     if po_vendor_col and net_amount_col and po_vendor_col in fil.columns and net_amount_col in fil.columns:
-        def build_vendor_spend():
-            df_ = fil.groupby(po_vendor_col, dropna=False)[net_amount_col].sum().reset_index().sort_values(net_amount_col, ascending=False)
-            df_['cr'] = df_[net_amount_col]/1e7
-            return df_
-        vs = memoized_compute('vendor_spend', filter_signature, build_vendor_spend)
-        st.dataframe(vs.head(50), use_container_width=True)
+        def build_vendor_stats():
+            # Spend by vendor
+            v_spend = fil.groupby(po_vendor_col, dropna=False)[net_amount_col].sum().reset_index()
+            v_spend.columns = [po_vendor_col, 'total_spend']
+            v_spend['cr'] = v_spend['total_spend'] / 1e7
+            
+            # Unique vendors count
+            unique_vendors = fil[po_vendor_col].nunique()
+            
+            # Entity-wise vendor counts
+            if 'entity' in fil.columns:
+                # nunique per entity
+                ent_v = fil.groupby('entity')[po_vendor_col].nunique().reset_index(name='vendor_count')
+            else:
+                ent_v = pd.DataFrame()
+            
+            # Category-wise spend & vendor count
+            if 'procurement_category' in fil.columns:
+                cat_stats = fil.groupby('procurement_category', dropna=False).agg(
+                    spend=(net_amount_col, 'sum'),
+                    vendor_count=(po_vendor_col, 'nunique')
+                ).reset_index()
+                cat_stats['spend_cr'] = cat_stats['spend'] / 1e7
+            else:
+                cat_stats = pd.DataFrame()
+                
+            return v_spend, unique_vendors, ent_v, cat_stats
+
+        vs, uv_count, ent_v, cat_stats = memoized_compute('vendor_stats', filter_signature, build_vendor_stats)
+        
+        # Metric
+        st.metric("Total Unique Vendors", uv_count)
+        st.markdown("---")
+        
+        # Charts
+        c1, c2 = st.columns(2)
+        
+        with c1:
+            st.subheader("Vendors by Entity")
+            if not ent_v.empty:
+                fig_ev = px.bar(ent_v, x='entity', y='vendor_count', text='vendor_count', title='Unique Vendors per Entity')
+                fig_ev.update_traces(textposition='outside')
+                st.plotly_chart(fig_ev, use_container_width=True)
+            else:
+                st.info("Entity information missing.")
+                
+        with c2:
+            st.subheader("Category-wise Stats")
+            if not cat_stats.empty:
+                # Toggle between Spend and Vendor Count
+                cat_mode = st.radio("Show Category by:", ["Spend (Cr)", "Vendor Count"], horizontal=True)
+                y_col = 'spend_cr' if cat_mode == "Spend (Cr)" else 'vendor_count'
+                fig_cat = px.bar(cat_stats.sort_values(y_col, ascending=False), x='procurement_category', y=y_col, text=y_col, title=f'Category by {cat_mode}')
+                fig_cat.update_traces(texttemplate='%{text:.2f}' if cat_mode=="Spend (Cr)" else '%{text}', textposition='outside')
+                st.plotly_chart(fig_cat, use_container_width=True)
+            else:
+                st.info("Procurement Category missing.")
+
+        st.markdown("---")
+        st.subheader('Top Vendors by Spend')
+        st.dataframe(vs.sort_values('cr', ascending=False).head(50), use_container_width=True)
     else:
         st.info('Vendor / Net Amount columns not present.')
 
