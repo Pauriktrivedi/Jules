@@ -1037,7 +1037,10 @@ with T[4]:
         c2.metric("Total Spend (Cr)", f"{total_spend:.2f}")
         
         # 1. Category / Service Bucket Drilldown
-        st.markdown("### 1. Service Buckets (Categories)")
+        st.markdown("### 1. Service Buckets (Categories) & Entity-wise Count")
+        
+        # Split layout for two charts
+        col_cat, col_ent = st.columns(2)
         
         # Aggregate by Category
         if 'procurement_category' in fil.columns:
@@ -1047,19 +1050,31 @@ with T[4]:
             ).reset_index().sort_values('Spend', ascending=False)
             cat_df['Spend (Cr)'] = cat_df['Spend'] / 1e7
             
-            # Chart
+            # Chart 1: Spend by Category
             fig_cat = px.bar(cat_df, x='procurement_category', y='Spend (Cr)', 
                              hover_data=['VendorCount'], text='Spend (Cr)',
                              title='Spend by Category')
             fig_cat.update_traces(texttemplate='%{text:.2f}', textposition='outside')
-            st.plotly_chart(fig_cat, use_container_width=True)
+            with col_cat:
+                st.plotly_chart(fig_cat, use_container_width=True)
             
             # Selector
             cats = ['All'] + sorted(cat_df['procurement_category'].dropna().astype(str).unique().tolist())
             sel_cat = st.selectbox("Select Category to Filter Vendors", cats)
         else:
             sel_cat = 'All'
-            st.info("Procurement Category not available.")
+            with col_cat:
+                st.info("Procurement Category not available.")
+
+        # Chart 2: Vendor Count by Entity
+        if 'entity' in fil.columns and po_vendor_col in fil.columns:
+            ent_v_count = fil.groupby('entity')[po_vendor_col].nunique().reset_index()
+            ent_v_count.columns = ['Entity', 'Vendor Count']
+            if not ent_v_count.empty:
+                fig_ent_count = px.pie(ent_v_count, values='Vendor Count', names='Entity', 
+                                     title='Vendor Count by Entity', hole=0.4)
+                with col_ent:
+                    st.plotly_chart(fig_ent_count, use_container_width=True)
 
         # Filter for Vendor section
         v_df = fil.copy()
@@ -1072,7 +1087,8 @@ with T[4]:
         # Vendor list in this context
         v_stats = v_df.groupby(po_vendor_col).agg(
             Spend=(net_amount_col, 'sum'),
-            PO_Count=(purchase_doc_col, 'nunique') if purchase_doc_col in v_df.columns else ('entity', 'count')
+            PO_Count=(purchase_doc_col, 'nunique') if purchase_doc_col in v_df.columns else ('entity', 'count'),
+            Buyers=('po_creator', lambda x: ', '.join(sorted(set(str(i) for i in x.dropna().unique() if str(i).strip() != ''))))
         ).reset_index()
         v_stats['Spend (Cr)'] = v_stats['Spend'] / 1e7
         v_stats = v_stats.sort_values('Spend (Cr)', ascending=False)
@@ -1093,14 +1109,14 @@ with T[4]:
             
             # Display enriched table instead of just list
             st.markdown("#### Vendor List (Sorted by Spend)")
-            display_cols = [po_vendor_col, 'Spend (Cr)', 'PO_Count', 'City', 'State', 'Phone', 'Email']
+            display_cols = [po_vendor_col, 'Buyers', 'Spend (Cr)', 'PO_Count', 'City', 'State', 'Phone', 'Email']
             st.dataframe(v_enriched[display_cols], use_container_width=True)
             
             # Use enriched list for selection
             v_list = v_stats[po_vendor_col].astype(str).tolist()
         else:
             v_list = v_stats[po_vendor_col].astype(str).tolist()
-            st.dataframe(v_stats[[po_vendor_col, 'Spend (Cr)', 'PO_Count']], use_container_width=True)
+            st.dataframe(v_stats[[po_vendor_col, 'Buyers', 'Spend (Cr)', 'PO_Count']], use_container_width=True)
 
         
         # Vendor Selector
@@ -1181,9 +1197,26 @@ with T[4]:
                 # Group by Vendor
                 v_found = found.groupby(po_vendor_col).agg(
                     Spend=(net_amount_col, 'sum'),
-                    Matches=('product_name', 'count')
+                    Matches=('product_name', 'count'),
+                    Buyers=('po_creator', lambda x: ', '.join(sorted(set(str(i) for i in x.dropna().unique() if str(i).strip() != ''))))
                 ).reset_index().sort_values('Spend', ascending=False)
                 v_found['Spend'] = v_found['Spend'].apply(lambda x: f"{x/1e7:.4f} Cr")
+                
+                # Merge contact details if available
+                if not vendor_master.empty:
+                    # Prepare join column
+                    v_found['VendorName_Norm'] = v_found[po_vendor_col].astype(str).str.lower().str.strip()
+                    
+                    # Deduplicate master data
+                    vm_unique = vendor_master.sort_values('Entity').drop_duplicates(subset=['VendorName_Norm'], keep='first')
+                    
+                    # Join
+                    v_found = pd.merge(v_found, vm_unique[['VendorName_Norm', 'Email', 'Phone', 'City', 'State']], 
+                                      on='VendorName_Norm', how='left')
+                    
+                    # Cleanup for display
+                    v_found = v_found.drop(columns=['VendorName_Norm'])
+                
                 st.write(f"Vendors supplying '{srv_query}':")
                 st.dataframe(v_found, use_container_width=True)
             else:
