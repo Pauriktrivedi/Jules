@@ -1121,6 +1121,90 @@ with T[4]:
         c1, c2, c3 = st.columns(3)
         c1.metric("Total Vendors", total_vendors)
         c2.metric("Total Spend (Cr)", f"{total_spend:.2f}")
+
+        # ----------------- New: Buyer-wise Vendor Portfolio -----------------
+        st.markdown("### 0. Buyer-wise Vendor Portfolio")
+        
+        # We need a context-aware dataframe that ignores Sidebar Buyer/Vendor filters 
+        # but respects FY, Date Range, Entity, Category.
+        # Construct df_context by applying base filters to df (raw processed data).
+        
+        df_context = df.copy()
+        
+        # Apply Time Filters
+        if pr_col and pr_col in df_context.columns:
+            d_check_ctx = df_context[pr_col]
+            if po_create_col and po_create_col in df_context.columns:
+                d_check_ctx = d_check_ctx.fillna(df_context[po_create_col])
+            df_context = df_context[(d_check_ctx >= pr_start) & (d_check_ctx <= pr_end)]
+        elif po_create_col and po_create_col in df_context.columns:
+            df_context = df_context[(df_context[po_create_col] >= pr_start) & (df_context[po_create_col] <= pr_end)]
+            
+        if date_basis and date_range_key:
+             # date_range_key is (sdt_iso, edt_iso)
+             # we can re-use sdt, edt from global scope if available, or parse date_range_key
+             # Actually, simpler to reuse the 'dr' logic if sdt/edt variables are available in scope.
+             # They are defined in the sidebar section.
+             try:
+                 if 'sdt' in locals() and 'edt' in locals():
+                     df_context = df_context[(df_context[date_basis] >= sdt) & (df_context[date_basis] <= edt)]
+             except:
+                 pass
+
+        # Apply Entity & Category Filters (Sidebar logic replicated)
+        if sel_e and 'entity' in df_context.columns and len(sel_e) < len(entity_choices):
+            df_context = df_context[df_context['entity'].isin(sel_e)]
+        if sel_pc and 'procurement_category' in df_context.columns and len(sel_pc) < len(proc_cat_choices):
+            df_context = df_context[df_context['procurement_category'].isin(sel_pc)]
+        if sel_b and 'Buyer.Type' in df_context.columns and len(sel_b) < len(choices_bt):
+            df_context = df_context[df_context['Buyer.Type'].isin(sel_b)]
+
+        # Get list of buyers from this context
+        ctx_buyers = sorted([str(x) for x in df_context['po_creator'].dropna().unique().tolist() if str(x).strip() != ''])
+        sel_buyer_portfolio = st.selectbox("Select Buyer to View Assigned Vendors", ['All'] + ctx_buyers)
+        
+        if sel_buyer_portfolio != 'All':
+            # 1. Identify vendors this buyer has used
+            buyer_specific_df = df_context[df_context['po_creator'] == sel_buyer_portfolio]
+            my_vendor_list = buyer_specific_df[po_vendor_col].unique().tolist()
+            
+            # 2. Get ALL transactions for these vendors (to see other buyers)
+            # This is the key requirement: "show multiple users for the vendors"
+            portfolio_df = df_context[df_context[po_vendor_col].isin(my_vendor_list)].copy()
+            
+            if not portfolio_df.empty:
+                # Aggregate
+                port_agg = portfolio_df.groupby(po_vendor_col).agg(
+                    Spend=(net_amount_col, 'sum'),
+                    PO_Count=(purchase_doc_col, 'nunique') if purchase_doc_col in portfolio_df.columns else ('entity', 'count'),
+                    Buyer_Count=('po_creator', 'nunique'),
+                    Assigned_Buyers=('po_creator', lambda x: ', '.join(sorted(set(str(i) for i in x.dropna().unique() if str(i).strip() != ''))))
+                ).reset_index()
+                
+                port_agg['Spend (Cr)'] = port_agg['Spend'] / 1e7
+                port_agg = port_agg.sort_values('Spend (Cr)', ascending=False)
+                
+                # Merge with master data for contact info
+                if not vendor_master.empty:
+                    port_agg['VendorName_Norm'] = port_agg[po_vendor_col].astype(str).str.lower().str.strip()
+                    vm_unique_p = vendor_master.sort_values('Entity').drop_duplicates(subset=['VendorName_Norm'], keep='first')
+                    port_agg = pd.merge(port_agg, vm_unique_p[['VendorName_Norm', 'City', 'State', 'Phone']], 
+                                      on='VendorName_Norm', how='left')
+                    port_agg = port_agg.drop(columns=['VendorName_Norm'])
+                
+                st.write(f"Vendors associated with **{sel_buyer_portfolio}** (and other buyers interactions):")
+                
+                # Reorder columns
+                cols_order = [po_vendor_col, 'Spend (Cr)', 'PO_Count', 'Buyer_Count', 'Assigned_Buyers']
+                if 'City' in port_agg.columns: cols_order += ['City', 'State', 'Phone']
+                
+                st.dataframe(port_agg[cols_order], use_container_width=True)
+            else:
+                st.warning("No vendor transactions found for this buyer in the selected timeframe.")
+        else:
+            st.info("Select a buyer to see their vendor portfolio and cross-buyer collaboration.")
+
+        st.markdown("---")
         
         # 1. Category / Service Bucket Drilldown
         st.markdown("### 1. Service Buckets (Categories) & Entity-wise Count")
