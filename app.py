@@ -336,6 +336,9 @@ def preprocess_data(_df: pd.DataFrame) -> pd.DataFrame:
     creator_clean = df['po_creator'].fillna('').astype(str).str.strip()
     df['po_buyer_type'] = np.where(creator_clean.isin(INDIRECT_BUYERS), 'Indirect', 'Direct')
 
+    # Fix: Vraj should be considered Direct even if touching Indirect buyer groups
+    df.loc[df['po_creator'] == 'Vraj', 'Buyer.Type'] = 'Direct'
+
     # pr_requester column detection and buyer_display
     purchase_doc_col = safe_col(df, ['purchase_doc', 'purchase_doc_number', 'purchase doc'])
     pr_requester_col = safe_col(df, ['pr_requester','requester','pr_requester_name','pr_requester_name','requester_name'])
