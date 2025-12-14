@@ -1359,6 +1359,95 @@ with T[4]:
             else:
                 st.dataframe(sub.head(50))
 
+            # --- START VPM SECTION ---
+            st.markdown("---")
+            st.markdown("### 4. Vendor Performance Management (VPM)")
+            
+            vpm1, vpm2 = st.columns(2)
+            
+            # A. Fulfillment Reliability (Fill Rate)
+            # Detect local column names for safety
+            qty_col_vpm = safe_col(sub, ['po_qty','po quantity','po_quantity','po qty'])
+            rcv_col_vpm = safe_col(sub, ['receivedqty','received_qty','received qty','received_qty'])
+            
+            if qty_col_vpm and rcv_col_vpm and qty_col_vpm in sub.columns and rcv_col_vpm in sub.columns:
+                sub_qty = pd.to_numeric(sub[qty_col_vpm], errors='coerce').fillna(0)
+                sub_rcv = pd.to_numeric(sub[rcv_col_vpm], errors='coerce').fillna(0)
+                
+                total_ord = sub_qty.sum()
+                total_rcv = sub_rcv.sum()
+                
+                fill_rate = (total_rcv / total_ord * 100) if total_ord > 0 else 0.0
+                
+                # Gauge chart
+                fig_fill = go.Figure(go.Indicator(
+                    mode = "gauge+number",
+                    value = fill_rate,
+                    title = {'text': "Volume Fill Rate (%)"},
+                    gauge = {'axis': {'range': [0, 100]}, 'bar': {'color': "green" if fill_rate >= 90 else "orange"}}
+                ))
+                fig_fill.update_layout(height=250, margin=dict(l=20,r=20,t=40,b=20))
+                with vpm1:
+                    st.plotly_chart(fig_fill, use_container_width=True)
+            else:
+                with vpm1:
+                    st.info("PO Qty / Received Qty columns not found — cannot calculate Fill Rate.")
+
+            # B. Promised Lead Time
+            # We use po_delivery_date (Expected) - po_create_date
+            del_date_col = safe_col(sub, ['po_delivery_date', 'po delivery date'])
+            if po_create_col and del_date_col and del_date_col in sub.columns and po_create_col in sub.columns:
+                sub_dates = sub[[po_create_col, del_date_col]].dropna().copy()
+                if not sub_dates.empty:
+                    sub_dates['lead_days'] = (sub_dates[del_date_col] - sub_dates[po_create_col]).dt.days
+                    avg_lead_days = sub_dates['lead_days'].mean()
+                    
+                    with vpm2:
+                        st.metric("Avg Promised Lead Time", f"{avg_lead_days:.1f} Days")
+                        # Histogram of lead times
+                        fig_lead = px.histogram(sub_dates, x='lead_days', nbins=20, title='Lead Time Distribution (Promised)', labels={'lead_days':'Days'})
+                        fig_lead.update_layout(height=200, margin=dict(l=20,r=20,t=40,b=20))
+                        st.plotly_chart(fig_lead, use_container_width=True)
+                else:
+                    with vpm2:
+                        st.info("No valid dates for Lead Time calc.")
+            else:
+                 with vpm2:
+                    st.info("PO Delivery Date / Create Date missing.")
+            
+            # C. Price Stability (Top Products)
+            st.markdown("**Price Stability (Top 5 Products by Spend)**")
+            if po_unit_rate_col and po_unit_rate_col in sub.columns and 'product_name' in sub.columns:
+                 # Filter valid rates
+                 sub_rate = sub[sub[po_unit_rate_col] > 0].copy()
+                 if not sub_rate.empty:
+                     stats = sub_rate.groupby('product_name').agg(
+                         Total_Spend=(net_amount_col, 'sum') if net_amount_col else (po_unit_rate_col, 'count'),
+                         Avg_Rate=(po_unit_rate_col, 'mean'),
+                         Min_Rate=(po_unit_rate_col, 'min'),
+                         Max_Rate=(po_unit_rate_col, 'max'),
+                         Std_Dev=(po_unit_rate_col, 'std'),
+                         Txn_Count=(po_unit_rate_col, 'count')
+                     ).reset_index()
+                     
+                     # Filter for relevant products (at least 2 txns to calc stability)
+                     stats = stats[stats['Txn_Count'] > 1].sort_values('Total_Spend', ascending=False).head(5)
+                     
+                     if not stats.empty:
+                         stats['CV (%)'] = (stats['Std_Dev'] / stats['Avg_Rate'] * 100).fillna(0).round(1)
+                         stats['Avg_Rate'] = stats['Avg_Rate'].map('{:,.2f}'.format)
+                         stats['Min_Rate'] = stats['Min_Rate'].map('{:,.2f}'.format)
+                         stats['Max_Rate'] = stats['Max_Rate'].map('{:,.2f}'.format)
+                         
+                         st.dataframe(stats[['product_name', 'Txn_Count', 'Avg_Rate', 'Min_Rate', 'Max_Rate', 'CV (%)']], use_container_width=True)
+                         st.caption("*CV (Coefficient of Variation) indicates price volatility. Lower is better.*")
+                     else:
+                         st.caption("Not enough repeated transactions to calculate price stability.")
+                 else:
+                     st.caption("No positive unit rates found.")
+            else:
+                 st.info("Unit Rate or Product Name column missing.")
+
         st.markdown("---")
         st.markdown("### 3. Reverse Lookup (Service -> Vendors)")
         # Simple text search for products to find vendors
