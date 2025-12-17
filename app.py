@@ -478,6 +478,9 @@ sel_o = st.sidebar.multiselect('PO Ordered By', creators)
 choices_bt = sorted(fil['Buyer.Type'].dropna().unique().tolist())
 sel_b = st.sidebar.multiselect('Buyer Type', choices_bt, default=choices_bt)
 
+# Item Type Filter (Products vs Services)
+# Logic: Service if procurement_category contains "Service" (case insensitive)
+item_type_opt = st.sidebar.radio("Item Type (Global)", ["All", "Products", "Services"], index=0)
 
 # Vendor + Item filters
 if po_vendor_col and po_vendor_col in fil.columns:
@@ -520,6 +523,19 @@ if sel_i and len(sel_i) < len(item_choices):
 
 if query_parts:
     fil = fil.query(' & '.join(query_parts))
+
+# Apply Item Type Filter (Products vs Services)
+if item_type_opt != "All" and 'procurement_category' in fil.columns:
+    # Identify Service rows
+    is_service = fil['procurement_category'].astype(str).str.contains('Service', case=False, na=False) | \
+                 fil['procurement_category'].astype(str).str.contains('Labor', case=False, na=False) | \
+                 fil['procurement_category'].astype(str).str.contains('Consultancy', case=False, na=False)
+    
+    if item_type_opt == "Services":
+        fil = fil[is_service]
+    else: # Products
+        fil = fil[~is_service]
+
 filter_end_time = time.time()
 logger.info(f"Filter application took: {filter_end_time - filter_start_time:.2f} seconds")
 
@@ -529,7 +545,7 @@ def _sel_key(values):
     return tuple(sorted(str(v) for v in values)) if values else ()
 filter_signature = (
     fy_key, date_range_key, _sel_key(sel_b), _sel_key(sel_e), _sel_key(sel_pc),
-    _sel_key(sel_o), _sel_key(sel_v), _sel_key(sel_i),
+    _sel_key(sel_o), _sel_key(sel_v), _sel_key(sel_i), item_type_opt
 )
 
 # Precompute month bucket once
@@ -1870,6 +1886,9 @@ with T[12]:
                 geo_stats['lon'] = geo_stats['State'].map(lambda x: STATE_COORDS.get(x, (None, None))[1])
                 geo_stats['label'] = geo_stats.apply(lambda row: f"{row['PO_Count']}\n({row['Percentage']:.1f}%)", axis=1)
 
+                # Filter labels to avoid clutter (e.g. only > 1% or significant count)
+                # Keep all but use dynamic text color/style or simple threshold
+                
                 try:
                     # Base Choropleth
                     fig_map = px.choropleth(
@@ -1883,15 +1902,21 @@ with T[12]:
                         title='PO Count by Vendor State (Heatmap)'
                     )
                     
-                    # Add Text Labels
-                    df_labels = geo_stats.dropna(subset=['lat', 'lon'])
+                    # Add Text Labels - Improved for Visibility
+                    # Only show labels with some significance to reduce overlapping
+                    df_labels = geo_stats.dropna(subset=['lat', 'lon']).copy()
+                    
+                    # Heuristic: Filter overlap for very small percentages if clustered?
+                    # For now, just render them with a clearer font/background
                     if not df_labels.empty:
                         fig_map.add_trace(go.Scattergeo(
                             lon=df_labels['lon'],
                             lat=df_labels['lat'],
                             text=df_labels['label'],
                             mode='text',
-                            textfont=dict(color='black', size=10, family='Arial Black'),
+                            textfont=dict(color='black', size=11, family='Arial', weight='bold'),
+                            textposition='middle center',
+                            showlegend=False
                         ))
 
                     fig_map.update_geos(fitbounds="locations", visible=False)
