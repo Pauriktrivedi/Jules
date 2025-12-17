@@ -272,6 +272,42 @@ def compute_buyer_display(df: pd.DataFrame, purchase_doc_col: str | None, reques
     buyer_display = np.select(conditions, choices, default='PR only - Unassigned')
     return pd.Series(buyer_display, index=df.index, dtype=object)
 
+def compute_item_type_vectorized(df: pd.DataFrame) -> pd.Series:
+    """Classifies items into 'Products' or 'Services' based on Category, Item Code, and Description."""
+    if df.empty:
+        return pd.Series(dtype=object)
+    
+    # 1. Explicit Service Categories
+    service_cats = {
+        'Service', 'Testing Services', 'IT Services', 'Recruitment', 'Repair & Maintenance', 
+        'Plant Consultancy Services', 'Repairs and Maint.- Vehicle', 'Advertisement And Agency Cost', 
+        'Customer Support Cost', 'Staff Welfare Cost', 'Electric Installation', 'Consulting Services', 
+        'Office Maintenance', 'Insurance Expense', 'Legal and professional', 'Software License', 
+        'SOFTWARE', 'Marketing', 'Network', 'Plant Maintenance', 'Transport'
+    }
+    
+    # 2. Prepare columns
+    cat_col = df.get('procurement_category', pd.Series('', index=df.index)).astype(str).fillna('')
+    code_col = df.get('item_code', pd.Series('', index=df.index)).astype(str).fillna('').str.upper()
+    prod_col = df.get('product_name', pd.Series('', index=df.index)).astype(str).fillna('').str.upper()
+    desc_col = df.get('item_description', pd.Series('', index=df.index)).astype(str).fillna('').str.upper()
+    
+    # 3. Vectorized Masks
+    mask_cat = cat_col.isin(service_cats)
+    
+    # Item Code Patterns: SER_, LBR_
+    mask_code = code_col.str.startswith('SER') | code_col.str.startswith('LBR')
+    
+    # Keywords in Product/Description
+    # Regex for distinct keywords to avoid partial matches like "Serviceable" (though likely safe)
+    service_keywords = r'\b(AMC|ANNUAL MAINTENANCE|SERVICE|FEE|CHARGES|CONSULTANCY|LABOUR|INSTALLATION|FREIGHT|TRANSPORT|SUBSCRIPTION|WARRANTY)\b'
+    mask_desc = prod_col.str.contains(service_keywords, regex=True) | desc_col.str.contains(service_keywords, regex=True)
+    
+    # 4. Final Logic: Any positive signal -> Service
+    is_service = mask_cat | mask_code | mask_desc
+    
+    return np.where(is_service, 'Services', 'Products')
+
 
 @st.cache_data(show_spinner=False)
 def preprocess_data(_df: pd.DataFrame) -> pd.DataFrame:
@@ -353,7 +389,10 @@ def preprocess_data(_df: pd.DataFrame) -> pd.DataFrame:
     if purchase_doc_col and purchase_doc_col in df.columns:
         to_cat(df, purchase_doc_col)
 
-    for c in ['entity', 'po_creator', 'buyer_display', po_vendor_col, 'Buyer.Type', 'procurement_category', 'product_name']:
+    # Compute Item.Type
+    df['Item.Type'] = compute_item_type_vectorized(df)
+
+    for c in ['entity', 'po_creator', 'buyer_display', po_vendor_col, 'Buyer.Type', 'procurement_category', 'product_name', 'Item.Type']:
         to_cat(df, c)
         
     return df
@@ -479,7 +518,6 @@ choices_bt = sorted(fil['Buyer.Type'].dropna().unique().tolist())
 sel_b = st.sidebar.multiselect('Buyer Type', choices_bt, default=choices_bt)
 
 # Item Type Filter (Products vs Services)
-# Logic: Service if procurement_category contains "Service" (case insensitive)
 item_type_opt = st.sidebar.radio("Item Type (Global)", ["All", "Products", "Services"], index=0)
 
 # Vendor + Item filters
@@ -525,16 +563,8 @@ if query_parts:
     fil = fil.query(' & '.join(query_parts))
 
 # Apply Item Type Filter (Products vs Services)
-if item_type_opt != "All" and 'procurement_category' in fil.columns:
-    # Identify Service rows
-    is_service = fil['procurement_category'].astype(str).str.contains('Service', case=False, na=False) | \
-                 fil['procurement_category'].astype(str).str.contains('Labor', case=False, na=False) | \
-                 fil['procurement_category'].astype(str).str.contains('Consultancy', case=False, na=False)
-    
-    if item_type_opt == "Services":
-        fil = fil[is_service]
-    else: # Products
-        fil = fil[~is_service]
+if item_type_opt != "All" and 'Item.Type' in fil.columns:
+    fil = fil[fil['Item.Type'] == item_type_opt]
 
 filter_end_time = time.time()
 logger.info(f"Filter application took: {filter_end_time - filter_start_time:.2f} seconds")
@@ -1914,7 +1944,7 @@ with T[12]:
                             lat=df_labels['lat'],
                             text=df_labels['label'],
                             mode='text',
-                            textfont=dict(color='black', size=11, family='Arial Black'),
+                            textfont=dict(color='black', size=12, family='Arial'),
                             textposition='middle center',
                             showlegend=False
                         ))
