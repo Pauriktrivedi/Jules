@@ -549,7 +549,7 @@ if st.sidebar.button('Reset Filters'):
 
 
 # ----------------- Tabs (structure preserved) -----------------
-T = st.tabs(['KPIs & Spend','PR/PO Timing','PO Approval','Delivery','Vendors','Dept & Services','Unit-rate Outliers','Forecast','Savings','Scorecards','Search','Full Data'])
+T = st.tabs(['KPIs & Spend','PR/PO Timing','PO Approval','Delivery','Vendors','Dept & Services','Unit-rate Outliers','Forecast','Savings','Scorecards','Search','Full Data', 'Geo Distribution'])
 
 # ----------------- KPIs & Spend -----------------
 with T[0]:
@@ -1774,5 +1774,96 @@ with T[11]:
         st.download_button('⬇️ Download full filtered data (CSV)', csv, file_name='p2p_full_filtered.csv', mime='text/csv')
     except Exception as e:
         st.error(f'Could not display full data: {e}')
+
+# ----------------- Geo Distribution -----------------
+with T[12]:
+    st.subheader('Geo Distribution of Processed Orders (India)')
+    
+    # Needs vendor master and filtered data
+    if po_vendor_col and po_vendor_col in fil.columns and not vendor_master.empty:
+        # 1. Prepare Transaction Data
+        # We need unique POs per vendor.
+        # fil has line items.
+        
+        # Normalize vendor name in fil for merging
+        df_geo_base = fil[[po_vendor_col, purchase_doc_col]].copy()
+        if purchase_doc_col not in df_geo_base.columns:
+             # Fallback if no PO col, use row count (less accurate for "Orders Processed" but safe)
+             df_geo_base['dummy_po'] = df_geo_base.index
+             po_col_geo = 'dummy_po'
+        else:
+             po_col_geo = purchase_doc_col
+             
+        df_geo_base['VendorName_Norm'] = df_geo_base[po_vendor_col].astype(str).str.lower().str.strip()
+        
+        # 2. Prepare Vendor Master (Deduplicate to get one State per vendor)
+        # We prioritize the master entries. If duplicates, pick first.
+        # Ensure State is present
+        if 'State' in vendor_master.columns:
+            vm_geo = vendor_master[vendor_master['State'].notna()].copy()
+            vm_geo['VendorName_Norm'] = vm_geo['VendorName_Norm'].astype(str).str.lower().str.strip()
+            # Deduplicate
+            vm_geo = vm_geo.drop_duplicates(subset=['VendorName_Norm'], keep='first')
+            
+            # 3. Merge
+            merged_geo = pd.merge(df_geo_base, vm_geo[['VendorName_Norm', 'State']], on='VendorName_Norm', how='inner')
+            
+            if not merged_geo.empty:
+                # 4. Aggregation by State
+                # Clean State Names for GeoJSON matching
+                # Common issue: "Maharashtra" vs "MAHARASHTRA" -> Title Case
+                merged_geo['State_Clean'] = merged_geo['State'].astype(str).str.strip().str.title()
+                
+                # Fix common mismatches for India GeoJSON
+                # (Simple manual mapping can be added if specific issues arise, e.g. "Delhi" vs "Nct Of Delhi")
+                state_corrections = {
+                    'Delhi': 'NCT of Delhi',
+                    'New Delhi': 'NCT of Delhi',
+                    'Telengana': 'Telangana',
+                    'Orissa': 'Odisha',
+                    'Andaman And Nicobar Islands': 'Andaman & Nicobar Island',
+                    # Add more as discovered
+                }
+                merged_geo['State_Clean'] = merged_geo['State_Clean'].replace(state_corrections)
+
+                geo_stats = merged_geo.groupby('State_Clean')[po_col_geo].nunique().reset_index()
+                geo_stats.columns = ['State', 'PO_Count']
+                
+                total_pos_geo = geo_stats['PO_Count'].sum()
+                geo_stats['Percentage'] = (geo_stats['PO_Count'] / total_pos_geo * 100)
+                
+                # 5. Plot
+                st.markdown(f"**Total Mapped POs:** {total_pos_geo}")
+                
+                # Public GeoJSON for India
+                # Using a reliable gist source for India states
+                geojson_url = "https://gist.githubusercontent.com/jbrobst/56c13bbbf9d97d187fea01ca62ea5112/raw/e388c4cae20aa53cb5090210a42ebb9b765c0a36/india_states.geojson"
+                
+                try:
+                    fig_map = px.choropleth(
+                        geo_stats,
+                        geojson=geojson_url,
+                        featureidkey='properties.ST_NM',
+                        locations='State',
+                        color='PO_Count',
+                        color_continuous_scale='Reds',
+                        hover_data=['Percentage', 'PO_Count'],
+                        title='PO Count by Vendor State (Heatmap)'
+                    )
+                    fig_map.update_geos(fitbounds="locations", visible=False)
+                    fig_map.update_traces(hovertemplate='<b>%{location}</b><br>PO Count: %{z}<br>Percentage: %{customdata[0]:.2f}%<extra></extra>')
+                    st.plotly_chart(fig_map, use_container_width=True)
+                    
+                    with st.expander("View State Data"):
+                        st.dataframe(geo_stats.sort_values('PO_Count', ascending=False).style.format({'Percentage': '{:.2f}%'}), use_container_width=True)
+                        
+                except Exception as e:
+                    st.error(f"Error rendering map: {e}")
+            else:
+                st.warning("No matched vendor locations found. Ensure Vendor Master is loaded and has 'State' info.")
+        else:
+            st.warning("Vendor Master file does not have a 'State' column.")
+    else:
+        st.info("Vendor Master data missing or no transactions available.")
 
 # EOF
