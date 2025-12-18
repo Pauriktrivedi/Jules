@@ -1658,6 +1658,17 @@ with T[8]:
         try:
             def build_savings():
                 z = fil.copy()
+                
+                # EXCLUSION: Drop specific outlier case if present (requested by user)
+                # Vendor: 'Gujarat Irrigation Contractor' or similar variants
+                if po_vendor_col and po_vendor_col in z.columns:
+                    # Filter out any vendor containing 'Gujarat' AND 'Irrigation' (case insensitive)
+                    # to be robust against slight naming variations.
+                    mask_exclude = z[po_vendor_col].astype(str).str.contains('Gujarat', case=False, na=False) & \
+                                   z[po_vendor_col].astype(str).str.contains('Irrigation', case=False, na=False)
+                    if mask_exclude.any():
+                        z = z[~mask_exclude]
+
                 # ensure any categorical columns used are converted to safe types first
                 for col in [pr_qty_col, pr_unit_rate_col, pr_value_col, po_qty_col, po_unit_rate_col, net_col]:
                     if col and col in z.columns and pd.api.types.is_categorical_dtype(z[col]):
