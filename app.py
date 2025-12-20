@@ -1914,7 +1914,7 @@ with T[12]:
                             lat=df_labels['lat'],
                             text=df_labels['label'],
                             mode='text',
-                            textfont=dict(color='black', size=11, family='Arial', weight='bold'),
+                            textfont=dict(color='black', size=11, family='Arial Black'),
                             textposition='middle center',
                             showlegend=False
                         ))
