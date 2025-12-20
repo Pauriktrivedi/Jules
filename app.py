@@ -272,42 +272,6 @@ def compute_buyer_display(df: pd.DataFrame, purchase_doc_col: str | None, reques
     buyer_display = np.select(conditions, choices, default='PR only - Unassigned')
     return pd.Series(buyer_display, index=df.index, dtype=object)
 
-def compute_item_type_vectorized(df: pd.DataFrame) -> pd.Series:
-    """Classifies items into 'Products' or 'Services' based on Category, Item Code, and Description."""
-    if df.empty:
-        return pd.Series(dtype=object)
-    
-    # 1. Explicit Service Categories
-    service_cats = {
-        'Service', 'Testing Services', 'IT Services', 'Recruitment', 'Repair & Maintenance', 
-        'Plant Consultancy Services', 'Repairs and Maint.- Vehicle', 'Advertisement And Agency Cost', 
-        'Customer Support Cost', 'Staff Welfare Cost', 'Electric Installation', 'Consulting Services', 
-        'Office Maintenance', 'Insurance Expense', 'Legal and professional', 'Software License', 
-        'SOFTWARE', 'Marketing', 'Network', 'Plant Maintenance', 'Transport'
-    }
-    
-    # 2. Prepare columns
-    cat_col = df.get('procurement_category', pd.Series('', index=df.index)).astype(str).fillna('')
-    code_col = df.get('item_code', pd.Series('', index=df.index)).astype(str).fillna('').str.upper()
-    prod_col = df.get('product_name', pd.Series('', index=df.index)).astype(str).fillna('').str.upper()
-    desc_col = df.get('item_description', pd.Series('', index=df.index)).astype(str).fillna('').str.upper()
-    
-    # 3. Vectorized Masks
-    mask_cat = cat_col.isin(service_cats)
-    
-    # Item Code Patterns: SER_, LBR_
-    mask_code = code_col.str.startswith('SER') | code_col.str.startswith('LBR')
-    
-    # Keywords in Product/Description
-    # Regex for distinct keywords to avoid partial matches like "Serviceable" (though likely safe)
-    service_keywords = r'\b(AMC|ANNUAL MAINTENANCE|SERVICE|FEE|CHARGES|CONSULTANCY|LABOUR|INSTALLATION|FREIGHT|TRANSPORT|SUBSCRIPTION|WARRANTY)\b'
-    mask_desc = prod_col.str.contains(service_keywords, regex=True) | desc_col.str.contains(service_keywords, regex=True)
-    
-    # 4. Final Logic: Any positive signal -> Service
-    is_service = mask_cat | mask_code | mask_desc
-    
-    return np.where(is_service, 'Services', 'Products')
-
 
 @st.cache_data(show_spinner=False)
 def preprocess_data(_df: pd.DataFrame) -> pd.DataFrame:
@@ -389,10 +353,7 @@ def preprocess_data(_df: pd.DataFrame) -> pd.DataFrame:
     if purchase_doc_col and purchase_doc_col in df.columns:
         to_cat(df, purchase_doc_col)
 
-    # Compute Item.Type
-    df['Item.Type'] = compute_item_type_vectorized(df)
-
-    for c in ['entity', 'po_creator', 'buyer_display', po_vendor_col, 'Buyer.Type', 'procurement_category', 'product_name', 'Item.Type']:
+    for c in ['entity', 'po_creator', 'buyer_display', po_vendor_col, 'Buyer.Type', 'procurement_category', 'product_name']:
         to_cat(df, c)
         
     return df
@@ -518,6 +479,7 @@ choices_bt = sorted(fil['Buyer.Type'].dropna().unique().tolist())
 sel_b = st.sidebar.multiselect('Buyer Type', choices_bt, default=choices_bt)
 
 # Item Type Filter (Products vs Services)
+# Logic: Service if procurement_category contains "Service" (case insensitive)
 item_type_opt = st.sidebar.radio("Item Type (Global)", ["All", "Products", "Services"], index=0)
 
 # Vendor + Item filters
@@ -563,8 +525,16 @@ if query_parts:
     fil = fil.query(' & '.join(query_parts))
 
 # Apply Item Type Filter (Products vs Services)
-if item_type_opt != "All" and 'Item.Type' in fil.columns:
-    fil = fil[fil['Item.Type'] == item_type_opt]
+if item_type_opt != "All" and 'procurement_category' in fil.columns:
+    # Identify Service rows
+    is_service = fil['procurement_category'].astype(str).str.contains('Service', case=False, na=False) | \
+                 fil['procurement_category'].astype(str).str.contains('Labor', case=False, na=False) | \
+                 fil['procurement_category'].astype(str).str.contains('Consultancy', case=False, na=False)
+    
+    if item_type_opt == "Services":
+        fil = fil[is_service]
+    else: # Products
+        fil = fil[~is_service]
 
 filter_end_time = time.time()
 logger.info(f"Filter application took: {filter_end_time - filter_start_time:.2f} seconds")
@@ -1658,39 +1628,18 @@ with T[8]:
         try:
             def build_savings():
                 z = fil.copy()
-                
-                # EXCLUSION: Drop specific outlier case if present (requested by user)
-                # Vendor: 'Gujarat Irrigation Contractor' or similar variants
-                if po_vendor_col and po_vendor_col in z.columns:
-                    # Filter out any vendor containing 'Gujarat' AND 'Irrigation' (case insensitive)
-                    # to be robust against slight naming variations.
-                    mask_exclude = z[po_vendor_col].astype(str).str.contains('Gujarat', case=False, na=False) & \
-                                   z[po_vendor_col].astype(str).str.contains('Irrigation', case=False, na=False)
-                    if mask_exclude.any():
-                        z = z[~mask_exclude]
-
                 # ensure any categorical columns used are converted to safe types first
                 for col in [pr_qty_col, pr_unit_rate_col, pr_value_col, po_qty_col, po_unit_rate_col, net_col]:
                     if col and col in z.columns and pd.api.types.is_categorical_dtype(z[col]):
                         z[col] = z[col].astype(object)
 
-                # compute PR line value: more robust logic
-                # 1. Try PR Value column
-                val_from_col = pd.Series(0.0, index=z.index)
+                # compute PR line value: prefer PR Value if present else PR Qty * PR Unit Rate
                 if pr_value_col and pr_value_col in z.columns:
-                    val_from_col = pd.to_numeric(z[pr_value_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0.0)
-                
-                # 2. Try Qty * Rate calculation
-                pr_q = pd.to_numeric(z.get(pr_qty_col, 0).astype(str).str.replace(',', ''), errors='coerce').fillna(0.0)
-                pr_r = pd.to_numeric(z.get(pr_unit_rate_col, 0).astype(str).str.replace(',', ''), errors='coerce').fillna(0.0)
-                val_calc = pr_q * pr_r
-
-                # 3. Use calculated if column is 0 but calculated is > 0 (data fix)
-                #    Otherwise trust column if present, else calc.
-                if pr_value_col and pr_value_col in z.columns:
-                    z['pr_line_value'] = np.where((val_from_col == 0) & (val_calc > 0), val_calc, val_from_col)
-                else:
-                    z['pr_line_value'] = val_calc
+                    z['pr_line_value'] = pd.to_numeric(z[pr_value_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0.0)
+                else: # safe multiplication with defaults
+                    pr_q = pd.to_numeric(z.get(pr_qty_col, 0).astype(str).str.replace(',', ''), errors='coerce').fillna(0.0)
+                    pr_r = pd.to_numeric(z.get(pr_unit_rate_col, 0).astype(str).str.replace(',', ''), errors='coerce').fillna(0.0)
+                    z['pr_line_value'] = pr_q * pr_r
 
                 # compute PO line net: prefer Net Amount if present else PO Qty * PO Unit Rate
                 if net_col and net_col in z.columns:
@@ -1704,14 +1653,9 @@ with T[8]:
                 z['pr_unit_rate_f'] = pd.to_numeric(z.get(pr_unit_rate_col, np.nan), errors='coerce')
                 z['po_unit_rate_f'] = pd.to_numeric(z.get(po_unit_rate_col, np.nan), errors='coerce')
 
-                # savings absolute
+                # savings absolute and percent (use pr_line_value as denominator when >0)
                 z['savings_abs'] = z['pr_line_value'] - z['po_line_value']
-                
-                # savings percent: exclude cases where PR Value is 0 (Unbudgeted/Unestimated)
                 z['savings_pct'] = np.where(z['pr_line_value'] > 0, (z['savings_abs'] / z['pr_line_value']) * 100.0, np.nan)
-                
-                # Flag for unestimated spend (PR=0, PO>0)
-                z['is_unestimated'] = (z['pr_line_value'] == 0) & (z['po_line_value'] > 0)
                 # per-unit pct if unit rates present
                 z['unit_rate_pct_saved'] = np.where(
                     z['pr_unit_rate_f'] > 0,
@@ -1970,7 +1914,7 @@ with T[12]:
                             lat=df_labels['lat'],
                             text=df_labels['label'],
                             mode='text',
-                            textfont=dict(color='black', size=12, family='Arial'),
+                            textfont=dict(color='black', size=11, family='Arial', weight='bold'),
                             textposition='middle center',
                             showlegend=False
                         ))
