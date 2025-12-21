@@ -272,42 +272,6 @@ def compute_buyer_display(df: pd.DataFrame, purchase_doc_col: str | None, reques
     buyer_display = np.select(conditions, choices, default='PR only - Unassigned')
     return pd.Series(buyer_display, index=df.index, dtype=object)
 
-def compute_item_type_vectorized(df: pd.DataFrame) -> pd.Series:
-    """Classifies items into 'Products' or 'Services' based on Category, Item Code, and Description."""
-    if df.empty:
-        return pd.Series(dtype=object)
-    
-    # 1. Explicit Service Categories
-    service_cats = {
-        'Service', 'Testing Services', 'IT Services', 'Recruitment', 'Repair & Maintenance', 
-        'Plant Consultancy Services', 'Repairs and Maint.- Vehicle', 'Advertisement And Agency Cost', 
-        'Customer Support Cost', 'Staff Welfare Cost', 'Electric Installation', 'Consulting Services', 
-        'Office Maintenance', 'Insurance Expense', 'Legal and professional', 'Software License', 
-        'SOFTWARE', 'Marketing', 'Network', 'Plant Maintenance', 'Transport'
-    }
-    
-    # 2. Prepare columns
-    cat_col = df.get('procurement_category', pd.Series('', index=df.index)).astype(str).fillna('')
-    code_col = df.get('item_code', pd.Series('', index=df.index)).astype(str).fillna('').str.upper()
-    prod_col = df.get('product_name', pd.Series('', index=df.index)).astype(str).fillna('').str.upper()
-    desc_col = df.get('item_description', pd.Series('', index=df.index)).astype(str).fillna('').str.upper()
-    
-    # 3. Vectorized Masks
-    mask_cat = cat_col.isin(service_cats)
-    
-    # Item Code Patterns: SER_, LBR_
-    mask_code = code_col.str.startswith('SER') | code_col.str.startswith('LBR')
-    
-    # Keywords in Product/Description
-    # Regex for distinct keywords to avoid partial matches like "Serviceable" (though likely safe)
-    service_keywords = r'\b(AMC|ANNUAL MAINTENANCE|SERVICE|FEE|CHARGES|CONSULTANCY|LABOUR|INSTALLATION|FREIGHT|TRANSPORT|SUBSCRIPTION|WARRANTY)\b'
-    mask_desc = prod_col.str.contains(service_keywords, regex=True) | desc_col.str.contains(service_keywords, regex=True)
-    
-    # 4. Final Logic: Any positive signal -> Service
-    is_service = mask_cat | mask_code | mask_desc
-    
-    return np.where(is_service, 'Services', 'Products')
-
 
 @st.cache_data(show_spinner=False)
 def preprocess_data(_df: pd.DataFrame) -> pd.DataFrame:
@@ -389,10 +353,7 @@ def preprocess_data(_df: pd.DataFrame) -> pd.DataFrame:
     if purchase_doc_col and purchase_doc_col in df.columns:
         to_cat(df, purchase_doc_col)
 
-    # Compute Item.Type
-    df['Item.Type'] = compute_item_type_vectorized(df)
-
-    for c in ['entity', 'po_creator', 'buyer_display', po_vendor_col, 'Buyer.Type', 'procurement_category', 'product_name', 'Item.Type']:
+    for c in ['entity', 'po_creator', 'buyer_display', po_vendor_col, 'Buyer.Type', 'procurement_category', 'product_name']:
         to_cat(df, c)
         
     return df
@@ -517,8 +478,6 @@ sel_o = st.sidebar.multiselect('PO Ordered By', creators)
 choices_bt = sorted(fil['Buyer.Type'].dropna().unique().tolist())
 sel_b = st.sidebar.multiselect('Buyer Type', choices_bt, default=choices_bt)
 
-# Item Type Filter (Products vs Services)
-item_type_opt = st.sidebar.radio("Item Type (Global)", ["All", "Products", "Services"], index=0)
 
 # Vendor + Item filters
 if po_vendor_col and po_vendor_col in fil.columns:
@@ -561,11 +520,6 @@ if sel_i and len(sel_i) < len(item_choices):
 
 if query_parts:
     fil = fil.query(' & '.join(query_parts))
-
-# Apply Item Type Filter (Products vs Services)
-if item_type_opt != "All" and 'Item.Type' in fil.columns:
-    fil = fil[fil['Item.Type'] == item_type_opt]
-
 filter_end_time = time.time()
 logger.info(f"Filter application took: {filter_end_time - filter_start_time:.2f} seconds")
 
@@ -575,7 +529,7 @@ def _sel_key(values):
     return tuple(sorted(str(v) for v in values)) if values else ()
 filter_signature = (
     fy_key, date_range_key, _sel_key(sel_b), _sel_key(sel_e), _sel_key(sel_pc),
-    _sel_key(sel_o), _sel_key(sel_v), _sel_key(sel_i), item_type_opt
+    _sel_key(sel_o), _sel_key(sel_v), _sel_key(sel_i),
 )
 
 # Precompute month bucket once
@@ -595,7 +549,7 @@ if st.sidebar.button('Reset Filters'):
 
 
 # ----------------- Tabs (structure preserved) -----------------
-T = st.tabs(['KPIs & Spend','PR/PO Timing','PO Approval','Delivery','Vendors','Dept & Services','Unit-rate Outliers','Forecast','Savings','Scorecards','Search','Full Data', 'Geo Distribution'])
+T = st.tabs(['KPIs & Spend','PR/PO Timing','PO Approval','Delivery','Vendors','Dept & Services','Unit-rate Outliers','Forecast','Savings','Scorecards','Search','Full Data'])
 
 # ----------------- KPIs & Spend -----------------
 with T[0]:
@@ -1820,229 +1774,5 @@ with T[11]:
         st.download_button('⬇️ Download full filtered data (CSV)', csv, file_name='p2p_full_filtered.csv', mime='text/csv')
     except Exception as e:
         st.error(f'Could not display full data: {e}')
-
-# ----------------- Geo Distribution -----------------
-with T[12]:
-    st.subheader('Geo Distribution of Processed Orders (India)')
-    
-    # Needs vendor master and filtered data
-    if po_vendor_col and po_vendor_col in fil.columns and not vendor_master.empty:
-        # 1. Prepare Transaction Data
-        # We need unique POs per vendor + spend info for drilldown
-        
-        # Select columns: Vendor, PO Number, Net Amount, Product
-        cols_to_keep_geo = [po_vendor_col, purchase_doc_col]
-        if net_amount_col and net_amount_col in fil.columns:
-            cols_to_keep_geo.append(net_amount_col)
-        if 'product_name' in fil.columns:
-            cols_to_keep_geo.append('product_name')
-            
-        df_geo_base = fil[cols_to_keep_geo].copy()
-        
-        if purchase_doc_col not in df_geo_base.columns:
-             # Fallback if no PO col, use row count (less accurate for "Orders Processed" but safe)
-             df_geo_base['dummy_po'] = df_geo_base.index
-             po_col_geo = 'dummy_po'
-        else:
-             po_col_geo = purchase_doc_col
-             
-        df_geo_base['VendorName_Norm'] = df_geo_base[po_vendor_col].astype(str).str.lower().str.strip()
-        
-        # 2. Prepare Vendor Master (Deduplicate to get one State per vendor)
-        # We prioritize the master entries. If duplicates, pick first.
-        # Ensure State is present
-        if 'State' in vendor_master.columns:
-            vm_geo = vendor_master[vendor_master['State'].notna()].copy()
-            vm_geo['VendorName_Norm'] = vm_geo['VendorName_Norm'].astype(str).str.lower().str.strip()
-            # Deduplicate
-            vm_geo = vm_geo.drop_duplicates(subset=['VendorName_Norm'], keep='first')
-            
-            # 3. Merge (Keep City if available)
-            cols_vm_geo = ['VendorName_Norm', 'State']
-            if 'City' in vm_geo.columns:
-                cols_vm_geo.append('City')
-                
-            merged_geo = pd.merge(df_geo_base, vm_geo[cols_vm_geo], on='VendorName_Norm', how='inner')
-            
-            if not merged_geo.empty:
-                # 4. Aggregation by State
-                # Clean State Names for GeoJSON matching
-                # Common issue: "Maharashtra" vs "MAHARASHTRA" -> Title Case
-                merged_geo['State_Clean'] = merged_geo['State'].astype(str).str.strip().str.title()
-                
-                # Fix common mismatches for India GeoJSON
-                state_corrections = {
-                    'Delhi': 'NCT of Delhi',
-                    'New Delhi': 'NCT of Delhi',
-                    'Telengana': 'Telangana',
-                    'Orissa': 'Odisha',
-                    'Andaman And Nicobar Islands': 'Andaman & Nicobar Island',
-                    'J&K': 'Jammu & Kashmir',
-                    # Add more as discovered
-                }
-                merged_geo['State_Clean'] = merged_geo['State_Clean'].replace(state_corrections)
-
-                geo_stats = merged_geo.groupby('State_Clean')[po_col_geo].nunique().reset_index()
-                geo_stats.columns = ['State', 'PO_Count']
-                
-                total_pos_geo = geo_stats['PO_Count'].sum()
-                geo_stats['Percentage'] = (geo_stats['PO_Count'] / total_pos_geo * 100)
-                
-                # 5. Plot
-                st.markdown(f"**Total Mapped POs:** {total_pos_geo}")
-                
-                # Public GeoJSON for India
-                geojson_url = "https://gist.githubusercontent.com/jbrobst/56c13bbbf9d97d187fea01ca62ea5112/raw/e388c4cae20aa53cb5090210a42ebb9b765c0a36/india_states.geojson"
-                
-                # Coordinates for State Labels
-                STATE_COORDS = {
-                    "Andhra Pradesh": (15.91, 79.74), "Arunachal Pradesh": (28.21, 94.72), "Assam": (26.20, 92.93),
-                    "Bihar": (25.09, 85.31), "Chhattisgarh": (21.27, 81.86), "Goa": (15.29, 74.12),
-                    "Gujarat": (22.25, 71.19), "Haryana": (29.05, 76.08), "Himachal Pradesh": (31.10, 77.17),
-                    "Jharkhand": (23.61, 85.27), "Karnataka": (15.31, 75.71), "Kerala": (10.85, 76.27),
-                    "Madhya Pradesh": (22.97, 78.65), "Maharashtra": (19.75, 75.71), "Manipur": (24.66, 93.90),
-                    "Meghalaya": (25.46, 91.36), "Mizoram": (23.16, 92.93), "Nagaland": (26.15, 94.56),
-                    "Odisha": (20.95, 85.09), "Punjab": (31.14, 75.34), "Rajasthan": (27.02, 74.21),
-                    "Sikkim": (27.53, 88.51), "Tamil Nadu": (11.12, 78.65), "Telangana": (18.11, 79.01),
-                    "Tripura": (23.94, 91.98), "Uttar Pradesh": (26.84, 80.94), "Uttarakhand": (30.06, 79.01),
-                    "West Bengal": (22.98, 87.85), "Andaman & Nicobar Island": (11.74, 92.65),
-                    "Chandigarh": (30.73, 76.77), "Dadra and Nagar Haveli and Daman and Diu": (20.18, 73.01),
-                    "NCT of Delhi": (28.70, 77.10), "Jammu & Kashmir": (33.77, 76.57),
-                    "Ladakh": (34.15, 77.57), "Lakshadweep": (10.56, 72.64), "Puducherry": (11.94, 79.80)
-                }
-
-                # Prepare labels for map
-                geo_stats['lat'] = geo_stats['State'].map(lambda x: STATE_COORDS.get(x, (None, None))[0])
-                geo_stats['lon'] = geo_stats['State'].map(lambda x: STATE_COORDS.get(x, (None, None))[1])
-                geo_stats['label'] = geo_stats.apply(lambda row: f"{row['PO_Count']}\n({row['Percentage']:.1f}%)", axis=1)
-
-                # Filter labels to avoid clutter (e.g. only > 1% or significant count)
-                # Keep all but use dynamic text color/style or simple threshold
-                
-                try:
-                    # Base Choropleth
-                    fig_map = px.choropleth(
-                        geo_stats,
-                        geojson=geojson_url,
-                        featureidkey='properties.ST_NM',
-                        locations='State',
-                        color='PO_Count',
-                        color_continuous_scale='Reds',
-                        hover_data=['Percentage', 'PO_Count'],
-                        title='PO Count by Vendor State (Heatmap)'
-                    )
-                    
-                    # Add Text Labels - Improved for Visibility
-                    # Only show labels with some significance to reduce overlapping
-                    df_labels = geo_stats.dropna(subset=['lat', 'lon']).copy()
-                    
-                    # Heuristic: Filter overlap for very small percentages if clustered?
-                    # For now, just render them with a clearer font/background
-                    if not df_labels.empty:
-                        fig_map.add_trace(go.Scattergeo(
-                            lon=df_labels['lon'],
-                            lat=df_labels['lat'],
-                            text=df_labels['label'],
-                            mode='text',
-                            textfont=dict(color='black', size=12, family='Arial'),
-                            textposition='middle center',
-                            showlegend=False
-                        ))
-
-                    fig_map.update_geos(fitbounds="locations", visible=False)
-                    fig_map.update_traces(hovertemplate='<b>%{location}</b><br>PO Count: %{z}<br>Percentage: %{customdata[0]:.2f}%<extra></extra>')
-                    fig_map.update_layout(height=600, margin={"r":0,"t":30,"l":0,"b":0})
-                    
-                    st.plotly_chart(fig_map, use_container_width=True)
-                    
-                    # --- DRILL DOWN SECTION ---
-                    st.markdown("---")
-                    st.subheader("State-wise Detailed Insights")
-                    
-                    # Selector
-                    sorted_states = geo_stats.sort_values('PO_Count', ascending=False)['State'].tolist()
-                    sel_state = st.selectbox("Select State for Details", sorted_states)
-                    
-                    if sel_state:
-                        # Filter merged data for this state
-                        state_df = merged_geo[merged_geo['State_Clean'] == sel_state].copy()
-                        
-                        if not state_df.empty:
-                            # State Metrics
-                            s_pos = state_df[po_col_geo].nunique()
-                            s_vendors = state_df[po_vendor_col].nunique()
-                            s_spend = state_df[net_amount_col].sum()/1e7 if net_amount_col and net_amount_col in state_df.columns else 0.0
-                            
-                            m1, m2, m3 = st.columns(3)
-                            m1.metric("PO Count", s_pos)
-                            m2.metric("Active Vendors", s_vendors)
-                            m3.metric("Total Spend (Cr)", f"{s_spend:.2f}")
-                            
-                            st.markdown(f"#### Deep Dive: {sel_state}")
-                            
-                            col_v, col_p, col_c = st.columns(3)
-                            
-                            # 1. Top Vendors
-                            v_grp = state_df.groupby(po_vendor_col).agg(
-                                POs=(po_col_geo, 'nunique'),
-                                Spend=(net_amount_col, 'sum') if net_amount_col and net_amount_col in state_df.columns else (po_col_geo, 'count')
-                            ).reset_index().sort_values('Spend', ascending=False).head(20)
-                            
-                            if net_amount_col and net_amount_col in state_df.columns:
-                                v_grp['Spend (Cr)'] = (v_grp['Spend']/1e7).map('{:,.2f}'.format)
-                                v_show = v_grp[[po_vendor_col, 'POs', 'Spend (Cr)']]
-                            else:
-                                v_show = v_grp[[po_vendor_col, 'POs']]
-                                
-                            col_v.write("**Top Vendors**")
-                            col_v.dataframe(v_show, use_container_width=True, hide_index=True)
-                            
-                            # 2. Top Products
-                            if 'product_name' in state_df.columns:
-                                p_grp = state_df.groupby('product_name').agg(
-                                    POs=(po_col_geo, 'nunique'),
-                                    Spend=(net_amount_col, 'sum') if net_amount_col and net_amount_col in state_df.columns else (po_col_geo, 'count')
-                                ).reset_index().sort_values('Spend', ascending=False).head(20)
-                                
-                                if net_amount_col and net_amount_col in state_df.columns:
-                                    p_grp['Spend (Cr)'] = (p_grp['Spend']/1e7).map('{:,.2f}'.format)
-                                    p_show = p_grp[['product_name', 'POs', 'Spend (Cr)']]
-                                else:
-                                    p_show = p_grp[['product_name', 'POs']]
-                                    
-                                col_p.write("**Top Products**")
-                                col_p.dataframe(p_show, use_container_width=True, hide_index=True)
-                            else:
-                                col_p.info("Product Name column missing.")
-                                
-                            # 3. Top Cities (if available)
-                            if 'City' in state_df.columns:
-                                c_grp = state_df.groupby('City').agg(
-                                    POs=(po_col_geo, 'nunique'),
-                                    Vendors=(po_vendor_col, 'nunique'),
-                                    Spend=(net_amount_col, 'sum') if net_amount_col and net_amount_col in state_df.columns else (po_col_geo, 'count')
-                                ).reset_index().sort_values('Spend', ascending=False).head(20)
-                                
-                                if net_amount_col and net_amount_col in state_df.columns:
-                                    c_grp['Spend (Cr)'] = (c_grp['Spend']/1e7).map('{:,.2f}'.format)
-                                    c_show = c_grp[['City', 'Vendors', 'Spend (Cr)']]
-                                else:
-                                    c_show = c_grp[['City', 'Vendors', 'POs']]
-                                
-                                col_c.write("**Top Cities**")
-                                col_c.dataframe(c_show, use_container_width=True, hide_index=True)
-                            else:
-                                col_c.info("City info not available.")
-                        else:
-                            st.info("No data for selected state.")
-
-                except Exception as e:
-                    st.error(f"Error rendering map: {e}")
-            else:
-                st.warning("No matched vendor locations found. Ensure Vendor Master is loaded and has 'State' info.")
-        else:
-            st.warning("Vendor Master file does not have a 'State' column.")
-    else:
-        st.info("Vendor Master data missing or no transactions available.")
 
 # EOF
