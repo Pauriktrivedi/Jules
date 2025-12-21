@@ -1,143 +1,235 @@
+import streamlit as st
 import pandas as pd
 import plotly.express as px
-import streamlit as st
+import plotly.graph_objects as go
+import os
 
-st.set_page_config(page_title="Vendor Spend Dashboard", layout="wide")
+# --- Page Configuration ---
+st.set_page_config(
+    page_title="Procurement & Vendor Spend Dashboard",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
+# --- CSS Styling ---
+st.markdown("""
+<style>
+    .metric-card {
+        background-color: #f0f2f6;
+        padding: 20px;
+        border-radius: 10px;
+        border: 1px solid #e0e0e0;
+        text-align: center;
+    }
+    .metric-label {
+        font-size: 14px;
+        color: #666;
+        margin-bottom: 5px;
+    }
+    .metric-value {
+        font-size: 24px;
+        font-weight: bold;
+        color: #333;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# --- Data Loading ---
 @st.cache_data
 def load_data():
     try:
-        vendors = pd.read_csv("vendors.csv")
-        reports = pd.read_csv("reports.csv")
-        
-        # Clean numeric columns in reports
-        reports['Net Amount'] = pd.to_numeric(reports['Net Amount'], errors='coerce').fillna(0)
-        reports['PO Quantity'] = pd.to_numeric(reports['PO Quantity'], errors='coerce').fillna(0)
-        
-        # Clean mixed type columns to avoid PyArrow errors
-        for col in reports.columns:
-            if reports[col].dtype == 'object':
-                 reports[col] = reports[col].astype(str)
+        # Load Vendors
+        if os.path.exists("vendors.csv"):
+            vendors = pd.read_csv("vendors.csv")
+            # Ensure string columns
+            for col in vendors.columns:
+                 if vendors[col].dtype == 'object':
+                     vendors[col] = vendors[col].astype(str).str.strip()
+        else:
+            vendors = pd.DataFrame()
 
-        # Parse Dates (after converting to string, need to handle 'nan')
-        reports['PO create Date'] = pd.to_datetime(reports['Po create Date'], errors='coerce')
-        reports['PR Date Submitted'] = pd.to_datetime(reports['PR Date Submitted'], errors='coerce')
-        
+        # Load Reports
+        if os.path.exists("reports.csv"):
+            reports = pd.read_csv("reports.csv")
+            
+            # Numeric Cleaning
+            numeric_cols = ['Net Amount', 'PR Value', 'PO Quantity', 'Unit Rate']
+            for col in numeric_cols:
+                if col in reports.columns:
+                    reports[col] = pd.to_numeric(reports[col], errors='coerce').fillna(0)
+            
+            # String Cleaning
+            string_cols = ['Buying legal entity', 'PO Vendor', 'Procurement Category', 'Buyer Group', 'Version', 'PR Number', 'Purchase Doc']
+            for col in string_cols:
+                if col in reports.columns:
+                    reports[col] = reports[col].astype(str).str.strip()
+            
+            # Date Parsing
+            reports['PO Date'] = pd.to_datetime(reports['Po create Date'], errors='coerce')
+            reports['PR Date'] = pd.to_datetime(reports['PR Date Submitted'], errors='coerce')
+            
+        else:
+            reports = pd.DataFrame()
+            
         return vendors, reports
-    except FileNotFoundError:
+
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
-vendors, reports = load_data()
+vendors_df, reports_df = load_data()
 
-st.title("Vendor Spend Dashboard")
+# --- Helper Functions ---
+def format_currency(val):
+    return f"₹{val:,.2f}"
 
-if reports.empty:
-    st.error("No data found. Please ensure 'reports.csv' and 'vendors.csv' exist.")
-else:
-    # --- Sidebar Filters ---
-    st.sidebar.header("Filters")
+# --- Main App Logic ---
+if reports_df.empty:
+    st.warning("No report data found. Please run the data processing script first.")
+    st.stop()
+
+# --- Sidebar Filters ---
+st.sidebar.title("Filters")
+
+# 1. Entity Filter
+all_entities = sorted(reports_df['Buying legal entity'].unique())
+selected_entities = st.sidebar.multiselect("Select Legal Entity", all_entities, default=all_entities)
+
+# 2. Date Filter
+min_date = reports_df['PO Date'].min()
+max_date = reports_df['PO Date'].max()
+
+start_date, end_date = st.sidebar.date_input(
+    "Date Range",
+    value=(min_date, max_date),
+    min_value=min_date,
+    max_value=max_date
+)
+
+# 3. Category Filter
+all_categories = sorted(reports_df['Procurement Category'].unique())
+selected_categories = st.sidebar.multiselect("Procurement Category", all_categories, default=all_categories)
+
+# --- Apply Filters ---
+mask = (
+    reports_df['Buying legal entity'].isin(selected_entities) &
+    (reports_df['PO Date'].dt.date >= start_date) &
+    (reports_df['PO Date'].dt.date <= end_date) &
+    reports_df['Procurement Category'].isin(selected_categories)
+)
+filtered_df = reports_df.loc[mask]
+
+# --- Dashboard Header ---
+st.title("📊 Procurement Overview Dashboard")
+st.markdown("---")
+
+# --- KPI Metrics ---
+col1, col2, col3, col4 = st.columns(4)
+
+total_spend = filtered_df['Net Amount'].sum()
+total_pos = filtered_df['Purchase Doc'].nunique()
+unique_vendors = filtered_df['PO Vendor'].nunique()
+avg_po_size = total_spend / total_pos if total_pos > 0 else 0
+
+with col1:
+    st.markdown(f"""<div class="metric-card"><div class="metric-label">Total Spend</div><div class="metric-value">{format_currency(total_spend)}</div></div>""", unsafe_allow_html=True)
+with col2:
+    st.markdown(f"""<div class="metric-card"><div class="metric-label">Total Purchase Orders</div><div class="metric-value">{total_pos}</div></div>""", unsafe_allow_html=True)
+with col3:
+    st.markdown(f"""<div class="metric-card"><div class="metric-label">Active Vendors</div><div class="metric-value">{unique_vendors}</div></div>""", unsafe_allow_html=True)
+with col4:
+    st.markdown(f"""<div class="metric-card"><div class="metric-label">Avg PO Value</div><div class="metric-value">{format_currency(avg_po_size)}</div></div>""", unsafe_allow_html=True)
+
+st.markdown("---")
+
+# --- Charts Section 1: Entity & Time Analysis ---
+c1, c2 = st.columns(2)
+
+with c1:
+    st.subheader("Spend by Legal Entity")
+    entity_spend = filtered_df.groupby('Buying legal entity')['Net Amount'].sum().reset_index()
+    fig_entity = px.bar(entity_spend, x='Buying legal entity', y='Net Amount', text_auto='.2s', color='Buying legal entity')
+    fig_entity.update_layout(showlegend=False)
+    st.plotly_chart(fig_entity, use_container_width=True)
+
+with c2:
+    st.subheader("Monthly Spend Trend")
+    if 'PO Date' in filtered_df:
+        monthly_spend = filtered_df.groupby(pd.Grouper(key='PO Date', freq='M'))['Net Amount'].sum().reset_index()
+        fig_trend = px.line(monthly_spend, x='PO Date', y='Net Amount', markers=True)
+        st.plotly_chart(fig_trend, use_container_width=True)
+
+# --- Charts Section 2: Category & Vendor Analysis ---
+c3, c4 = st.columns(2)
+
+with c3:
+    st.subheader("Spend by Procurement Category")
+    cat_spend = filtered_df.groupby('Procurement Category')['Net Amount'].sum().reset_index()
+    fig_cat = px.treemap(cat_spend, path=['Procurement Category'], values='Net Amount')
+    st.plotly_chart(fig_cat, use_container_width=True)
+
+with c4:
+    st.subheader("Top 10 Vendors by Spend")
+    vendor_spend = filtered_df.groupby('PO Vendor')['Net Amount'].sum().sort_values(ascending=False).head(10).reset_index()
+    fig_top_vendors = px.bar(vendor_spend, y='PO Vendor', x='Net Amount', orientation='h', text_auto='.2s', color='Net Amount')
+    fig_top_vendors.update_layout(yaxis={'categoryorder':'total ascending'})
+    st.plotly_chart(fig_top_vendors, use_container_width=True)
+
+# --- Detailed Analysis Tabs ---
+st.markdown("---")
+st.header("Deep Dive Analysis")
+
+tab_vendor, tab_data = st.tabs(["Vendor Details", "Raw Data Explorer"])
+
+with tab_vendor:
+    col_v1, col_v2 = st.columns([1, 2])
     
-    # Date Range
-    min_date = reports['PO create Date'].min()
-    max_date = reports['PO create Date'].max()
-    
-    if pd.notnull(min_date) and pd.notnull(max_date):
-        date_range = st.sidebar.date_input(
-            "Select PO Date Range",
-            value=(min_date, max_date),
-            min_value=min_date,
-            max_value=max_date
-        )
-    else:
-        date_range = []
-
-    # Filter Data based on Date
-    filtered_reports = reports.copy()
-    if len(date_range) == 2:
-        start_date, end_date = date_range
-        mask = (filtered_reports['PO create Date'].dt.date >= start_date) & (filtered_reports['PO create Date'].dt.date <= end_date)
-        filtered_reports = filtered_reports.loc[mask]
-
-    # --- KPI Row ---
-    col1, col2, col3, col4 = st.columns(4)
-    
-    total_spend = filtered_reports['Net Amount'].sum()
-    total_pos = filtered_reports['Purchase Doc'].nunique()
-    total_vendors = filtered_reports['PO Vendor'].nunique()
-    avg_po_value = total_spend / total_pos if total_pos > 0 else 0
-
-    col1.metric("Total Spend", f"₹{total_spend:,.2f}")
-    col2.metric("Total POs", f"{total_pos}")
-    col3.metric("Active Vendors", f"{total_vendors}")
-    col4.metric("Avg PO Value", f"₹{avg_po_value:,.2f}")
-
-    # --- Tabs ---
-    tab1, tab2, tab3 = st.tabs(["Overview", "Vendor Analysis", "Data View"])
-
-    with tab1:
-        st.subheader("Spend Over Time")
-        # Aggregate by Month
-        if not filtered_reports.empty and 'PO create Date' in filtered_reports:
-             spend_over_time = filtered_reports.groupby(filtered_reports['PO create Date'].dt.to_period("M"))['Net Amount'].sum().reset_index()
-             spend_over_time['PO create Date'] = spend_over_time['PO create Date'].astype(str)
-             
-             fig_time = px.line(spend_over_time, x='PO create Date', y='Net Amount', markers=True, title="Monthly Spend Trend")
-             st.plotly_chart(fig_time, use_container_width=True)
+    with col_v1:
+        st.subheader("Select Vendor")
+        # Get list of vendors present in the filtered reports
+        available_vendors = sorted(filtered_df['PO Vendor'].unique())
+        selected_vendor_name = st.selectbox("Choose a Vendor", available_vendors)
         
-        col_cat1, col_cat2 = st.columns(2)
-        
-        with col_cat1:
-            st.subheader("Spend by Procurement Category")
-            if 'Procurement Category' in filtered_reports:
-                cat_spend = filtered_reports.groupby('Procurement Category')['Net Amount'].sum().reset_index()
-                fig_cat = px.pie(cat_spend, values='Net Amount', names='Procurement Category', title="Spend Distribution by Category")
-                st.plotly_chart(fig_cat, use_container_width=True)
-        
-        with col_cat2:
-             st.subheader("Spend by Buyer Group")
-             if 'Buyer Group' in filtered_reports:
-                 buyer_spend = filtered_reports.groupby('Buyer Group')['Net Amount'].sum().reset_index()
-                 fig_buyer = px.bar(buyer_spend, x='Buyer Group', y='Net Amount', title="Spend by Buyer Group")
-                 st.plotly_chart(fig_buyer, use_container_width=True)
-
-    with tab2:
-        st.subheader("Top Vendors by Spend")
-        
-        top_n = st.slider("Select Top N Vendors", 5, 50, 10)
-        
-        vendor_spend = filtered_reports.groupby('PO Vendor')['Net Amount'].sum().sort_values(ascending=False).reset_index()
-        
-        fig_vendor = px.bar(vendor_spend.head(top_n), x='Net Amount', y='PO Vendor', orientation='h', title=f"Top {top_n} Vendors by Spend")
-        fig_vendor.update_layout(yaxis={'categoryorder':'total ascending'})
-        st.plotly_chart(fig_vendor, use_container_width=True)
-        
-        st.subheader("Vendor Details Lookup")
-        selected_vendor = st.selectbox("Select Vendor to View Details", options=sorted(filtered_reports['PO Vendor'].dropna().unique()))
-        
-        if selected_vendor:
-            # Filter reports for this vendor
-            vendor_txns = filtered_reports[filtered_reports['PO Vendor'] == selected_vendor]
-            st.write(f"**Total Spend:** ₹{vendor_txns['Net Amount'].sum():,.2f}")
-            st.write(f"**Total Transactions:** {len(vendor_txns)}")
+    if selected_vendor_name:
+        with col_v2:
+            st.subheader(f"Profile: {selected_vendor_name}")
             
-            # Try to find contact details in vendors df
-            if not vendors.empty:
-                 # Clean names for matching
-                 clean_name = str(selected_vendor).strip().upper()
-                 # Ensure vendors columns are string
-                 vendors['Vendor Name Clean'] = vendors['Vendor Name'].astype(str).str.strip().str.upper()
-                 
-                 matched_info = vendors[vendors['Vendor Name Clean'] == clean_name]
-                 
-                 if not matched_info.empty:
-                     st.write("### Contact Information (from Vendor Master)")
-                     info = matched_info.iloc[0]
-                     st.write(f"**Address:** {info.get('Address', 'N/A')}")
-                     st.write(f"**Email:** {info.get('Email', 'N/A')}")
-                     st.write(f"**Telephone:** {info.get('Telephone', 'N/A')}")
-                 else:
-                     st.info("No contact details found in Vendor Master list.")
+            # --- Vendor Master Info ---
+            if not vendors_df.empty:
+                # Fuzzy/Normalized Matching
+                clean_target = selected_vendor_name.upper()
+                # Create temp column for matching
+                vendors_df['MatchName'] = vendors_df['Vendor Name'].str.upper()
+                
+                # Check for direct match
+                match = vendors_df[vendors_df['MatchName'] == clean_target]
+                
+                if not match.empty:
+                    info = match.iloc[0]
+                    st.info(f"""
+                    **Vendor Account:** {info.get('Vendor Account', 'N/A')}  
+                    **Phone:** {info.get('Telephone', 'N/A')}  
+                    **Email:** {info.get('Email', 'N/A')}  
+                    **Address:** {info.get('Address', 'N/A')}
+                    """)
+                else:
+                    st.warning("Vendor contact details not found in Master Record.")
+            
+        # --- Vendor Stats ---
+        v_df = filtered_df[filtered_df['PO Vendor'] == selected_vendor_name]
+        
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Vendor Total Spend", format_currency(v_df['Net Amount'].sum()))
+        m2.metric("PO Count", v_df['Purchase Doc'].nunique())
+        m3.metric("Avg Ticket Size", format_currency(v_df['Net Amount'].mean()))
+        
+        st.subheader("Transaction History")
+        display_cols = ['PO Date', 'Purchase Doc', 'Item Description', 'PO Quantity', 'Unit Rate', 'Net Amount', 'PO Status', 'Buying legal entity']
+        # Filter columns that actually exist
+        cols_to_show = [c for c in display_cols if c in v_df.columns]
+        st.dataframe(v_df[cols_to_show].sort_values('PO Date', ascending=False), use_container_width=True)
 
-    with tab3:
-        st.subheader("Raw Data")
-        st.dataframe(filtered_reports)
+with tab_data:
+    st.subheader("Filtered Data Export")
+    st.dataframe(filtered_df)
